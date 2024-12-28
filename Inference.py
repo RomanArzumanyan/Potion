@@ -12,8 +12,6 @@
 
 import json
 
-import python_vali as vali
-from queue import Empty
 from multiprocessing import Queue
 import multiprocessing as mp
 import numpy as np
@@ -21,7 +19,7 @@ import torch
 import torchvision
 import logging
 from multiprocessing.synchronize import Event as SyncEvent
-import atexit
+import Decoder
 
 logger = logging.getLogger(__file__)
 
@@ -122,42 +120,18 @@ coco_names = [
 COLORS = np.random.uniform(0, 255, size=(len(coco_names), 3))
 
 
-class QueueAdapter:
-    def __init__(self, inp_queue: Queue, dump: bool, stop_event: SyncEvent,):
-        self.inp_queue = inp_queue
-        self.stop_event = stop_event
-        self.dump = dump
-        self.f_out = open("dump.bin", "ab")
-        atexit.register(self.cleanup)
+def save_result(res_json, idx, outputs) -> None:
+    pred_classes = [coco_names[i] for i in outputs[0]["labels"].cpu().numpy()]
+    pred_scores = outputs[0]["scores"].detach().cpu().numpy()
+    pred_bboxes = outputs[0]["boxes"].detach().cpu().numpy()
+    boxes = pred_bboxes[pred_scores >= 0.5].astype(np.int32)
 
-    def cleanup(self):
-        self.f_out.close()
-
-    def read(self, size: int) -> bytes:
-        while not self.stop_event.is_set():
-            try:
-                chunk = self.inp_queue.get_nowait()
-                if self.dump:
-                    self.f_out.write(chunk)
-                return chunk
-
-            except Empty:
-                continue
-
-            except ValueError:
-                logger.info("Queue is closed.")
-                return bytes()
-
-            except Exception as e:
-                logger.error(f"Unexpected excepton: {str(e)}")
-
-
-def save_result(res_json, idx, boxes, classes) -> None:
     key = "frame " + str(idx)
     frame = {key: []}
+
     for i, box in enumerate(boxes):
         bbox = {"bbox": box.tolist()}
-        detection = {classes[i]: bbox}
+        detection = {pred_classes[i]: bbox}
         frame[key].append(detection)
 
     res_json["detections"].append(frame)
@@ -172,48 +146,21 @@ def inference(
     gpu_id=0,
 ) -> None:
 
-    # Create decoder
-    adapter = QueueAdapter(inp_queue, dump, stop_event)
-    py_dec = vali.PyDecoder(adapter, {}, gpu_id)
-
-    # Allocate surfaces just once
-    surfaces = [
-        vali.Surface.Make(vali.PixelFormat.NV12,
-                          py_dec.Width, py_dec.Height, gpu_id),
-        vali.Surface.Make(vali.PixelFormat.RGB, py_dec.Width,
-                          py_dec.Height, gpu_id),
-        vali.Surface.Make(vali.PixelFormat.RGB_PLANAR,
-                          py_dec.Width, py_dec.Height, gpu_id),
-    ]
-
-    # Color converters + context
-    convs = [
-        vali.PySurfaceConverter(
-            surfaces[0].Format, surfaces[1].Format, gpu_id),
-        vali.PySurfaceConverter(
-            surfaces[1].Format, surfaces[2].Format, gpu_id),
-    ]
+    try:
+        dec = Decoder.NvDecoder(inp_queue, stop_event, dump, gpu_id)
+    except Exception as e:
+        logger.fatal(f"Failed to create decoder: {e}")
+        return
 
     idx = 0
     res_json = {"detections": []}
 
     while not stop_event.is_set():
         try:
-            # Decoding
-            success, info = py_dec.DecodeSingleSurface(surfaces[0])
-            if not success:
-                logger.error(info)
-                continue
-
-            # Color conversion
-            for i in range(0, len(convs)):
-                success, info = convs[i].Run(surfaces[i], surfaces[i + 1])
-                if not success:
-                    logger.error(info)
-                    break
+            surf = dec.decode()
 
             # Export to tensor
-            img_tensor = torch.from_dlpack(surfaces[2])
+            img_tensor = torch.from_dlpack(surf)
             img_tensor = img_tensor.clone().detach()
             img_tensor = img_tensor.type(dtype=torch.cuda.FloatTensor)
 
@@ -228,17 +175,8 @@ def inference(
             # Run inference.
             with torch.no_grad():
                 outputs = model(input_batch)
-
-            # Collect segmentation results.
-            pred_classes = [coco_names[i]
-                            for i in outputs[0]["labels"].cpu().numpy()]
-            pred_scores = outputs[0]["scores"].detach().cpu().numpy()
-            pred_bboxes = outputs[0]["boxes"].detach().cpu().numpy()
-            boxes = pred_bboxes[pred_scores >= 0.5].astype(np.int32)
-
-            # Save to json
-            idx += 1
-            save_result(res_json, idx, boxes, pred_classes)
+                save_result(res_json, idx, outputs)
+                idx += 1
 
         except Exception as e:
             logger.error(f"Unexpected exception: {str(e)}")

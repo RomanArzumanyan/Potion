@@ -50,6 +50,8 @@ class QueueAdapter:
             except Exception as e:
                 logger.error(f"Unexpected excepton: {str(e)}")
 
+        return bytes()
+
 
 class NvDecoder:
     def __init__(self,

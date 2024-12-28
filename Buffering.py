@@ -63,11 +63,10 @@ def get_stream_params(url: str) -> Dict:
             params["codec"] = stream["codec_name"]
             pix_fmt = stream["pix_fmt"]
             is_yuv420 = pix_fmt == "yuv420p" or pix_fmt == "yuvj420p"
-            is_yuv444 = pix_fmt == "yuv444p"
 
-            if not is_yuv420 and not is_yuv444:
+            if not is_yuv420:
                 raise ValueError(
-                    f"Unsupported format {pix_fmt}: neither yuv420 nor yuv444"
+                    f"Unsupported format {pix_fmt}. Only yuv420 for now"
                 )
 
             params["format"] = (

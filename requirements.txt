@@ -1,0 +1,4 @@
+numpy==2.2.1
+python_vali==4.2.4.post0
+torch==2.3.0
+torchvision==0.18.0

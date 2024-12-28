@@ -18,7 +18,6 @@ import logging
 import time
 import Buffering
 import Inference
-import os
 
 logger = logging.getLogger(__file__)
 

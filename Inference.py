@@ -12,18 +12,16 @@
 
 import json
 
-from typing import Dict
 import python_vali as vali
 from queue import Empty
-from multiprocessing import Queue, Process, Event
+from multiprocessing import Queue
 import multiprocessing as mp
 import numpy as np
 import torch
 import torchvision
 import logging
-import os
 from multiprocessing.synchronize import Event as SyncEvent
-from io import BytesIO
+import atexit
 
 logger = logging.getLogger(__file__)
 
@@ -129,14 +127,18 @@ class QueueAdapter:
         self.inp_queue = inp_queue
         self.stop_event = stop_event
         self.dump = dump
+        self.f_out = open("dump.bin", "ab")
+        atexit.register(self.cleanup)
+
+    def cleanup(self):
+        self.f_out.close()
 
     def read(self, size: int) -> bytes:
         while not self.stop_event.is_set():
             try:
                 chunk = self.inp_queue.get_nowait()
                 if self.dump:
-                    with open("dump.bin", "ab") as f_out:
-                        f_out.write(chunk)
+                    self.f_out.write(chunk)
                 return chunk
 
             except Empty:

@@ -23,6 +23,15 @@ logger = logging.getLogger(__file__)
 
 class QueueAdapter:
     def __init__(self, inp_queue: Queue, dump: bool, stop_event: SyncEvent,):
+        """
+        Constructor
+
+        Args:
+            inp_queue (Queue): queue with video chunks
+            dump (bool): flag, set up to tell adapter to dump video track
+            stop_event (SyncEvent): multiprocessing event which stops adapter from reading chunks from queue
+        """
+
         self.inp_queue = inp_queue
         self.stop_event = stop_event
         self.dump = dump
@@ -33,6 +42,17 @@ class QueueAdapter:
         self.f_out.close()
 
     def read(self, size: int) -> bytes:
+        """
+        Simple adapter which meets the vali.PyDecoder readable object interface.
+        It takes chunks from queue and gives them to decoder.
+
+        Args:
+            size (int): requested read size
+
+        Returns:
+            bytes: compressed video bytes
+        """
+
         while not self.stop_event.is_set():
             try:
                 chunk = self.inp_queue.get_nowait()
@@ -59,6 +79,15 @@ class NvDecoder:
                  stop_event: SyncEvent,
                  dump: bool,
                  gpu_id=0,):
+        """
+        Constructor
+
+        Args:
+            inp_queue (Queue): queue with video chunks
+            stop_event (SyncEvent): multiprocessing event which stops adapter from reading chunks from queue
+            dump (bool): flag, set up to tell adapter to dump video track
+            gpu_id (int, optional): GPU to run on. Defaults to 0.
+        """
 
         self.adapter = QueueAdapter(inp_queue, dump, stop_event)
         self.py_dec = vali.PyDecoder(self.adapter, {}, gpu_id)
@@ -81,6 +110,13 @@ class NvDecoder:
         ]
 
     def decode(self) -> vali.Surface:
+        """
+        Decode single video frame
+
+        Returns:
+            vali.Surface: Surface with reconstructed pixels.
+        """
+
         try:
             success, info = self.py_dec.DecodeSingleSurface(self.surfaces[0])
             if not success:

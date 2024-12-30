@@ -72,11 +72,22 @@ if __name__ == "__main__":
         help="dump video track to ./dump.bin",
     )
 
+    parser.add_argument(
+        "-n",
+        "--num_retries",
+        type=int,
+        required=False,
+        default=3,
+        help="number of attepts to respawn video reader in case of failure",
+    )
+
     args = parser.parse_args()
 
     # 1.1
     # Prepare video track params and variable size queue.
-    params = Buffering.get_stream_params(args.input)
+    buf_class = Buffering.StreamBuffer(
+        args.input, {'num_retries': args.num_retries})
+    params = buf_class.get_params()
     buf_queue = Queue(maxsize=0)
 
     # 1.2
@@ -84,8 +95,8 @@ if __name__ == "__main__":
     # It ensures that no frame will be lost if processing is slow.
     buf_proc_stop = mp.Event()
     buf_proc = Process(
-        target=Buffering.buf_stream,
-        args=(args.input, params, buf_queue, buf_proc_stop)
+        target=buf_class.buf_stream,
+        args=(buf_queue, buf_proc_stop)
     )
     buf_proc.start()
 

@@ -90,13 +90,22 @@ class NvDecoder:
         """
 
         self.adapter = QueueAdapter(inp_queue, dump, stop_event)
-        self.py_dec = vali.PyDecoder(self.adapter, {}, gpu_id)
+
+        # First try to create HW-accelerated decoder.
+        # Some codecs / formats may not be supported, fall back to SW decoder then.
+        try:
+            self.py_dec = vali.PyDecoder(self.adapter, {}, gpu_id)
+        except Exception as e:
+            # No exception handling here.
+            # Failure to create SW decoder is fatal.
+            logger.warning(f"Failed to create HW decoder, reason: {str(e)}")
+            self.py_dec = vali.PyDecoder(self.adapter, {}, gpu_id=-1)
 
         width = self.py_dec.Width
         height = self.py_dec.Height
 
         self.surfaces = [
-            vali.Surface.Make(vali.PixelFormat.NV12, width, height, gpu_id),
+            vali.Surface.Make(self.py_dec.Format, width, height, gpu_id),
             vali.Surface.Make(vali.PixelFormat.RGB, width, height, gpu_id),
             vali.Surface.Make(vali.PixelFormat.RGB_PLANAR,
                               width, height, gpu_id),
@@ -109,6 +118,13 @@ class NvDecoder:
                 self.surfaces[1].Format, self.surfaces[2].Format, gpu_id),
         ]
 
+        # SW decoder outputs to numpy array.
+        # Have to initialize uploader to keep decoded frames always in vRAM.
+        if not self.py_dec.IsAccelerated:
+            self.uploader = vali.PyFrameUploader(gpu_id)
+            self.dec_frame = np.ndarray(shape=(self.py_dec.HostFrameSize),
+                                        dtype=np.uint8)
+
     def decode(self) -> vali.Surface:
         """
         Decode single video frame
@@ -118,12 +134,25 @@ class NvDecoder:
         """
 
         try:
-            success, info = self.py_dec.DecodeSingleSurface(self.surfaces[0])
-            if not success:
-                logger.error(info)
-                return None
+            if self.py_dec.IsAccelerated:
+                success, info = self.py_dec.DecodeSingleSurface(
+                    self.surfaces[0])
+                if not success:
+                    logger.error(info)
+                    return None
+            else:
+                success, info = self.py_dec.DecodeSingleFrame(self.dec_frame)
+                if not success:
+                    logger.error(info)
+                    return None
 
-            # Color conversion
+                success, info = self.uploader.Run(
+                    self.dec_frame, self.surfaces[0])
+                if not success:
+                    logger.error(info)
+                    return None
+
+                # Color conversion
             for i in range(0, len(self.convs)):
                 success, info = self.convs[i].Run(
                     self.surfaces[i], self.surfaces[i + 1])

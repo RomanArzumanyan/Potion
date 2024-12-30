@@ -83,6 +83,10 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # Basic agsparse validation
+    if args.gpu_id < 0:
+        raise RuntimeError("Invalid gpu id, must be >= 0")
+
     # 1.1
     # Prepare video track params and variable size queue.
     buf_class = Buffering.StreamBuffer(

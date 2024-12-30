@@ -121,7 +121,7 @@ class NvDecoder:
         # SW decoder outputs to numpy array.
         # Have to initialize uploader to keep decoded frames always in vRAM.
         if not self.py_dec.IsAccelerated:
-            self.uploader = vali.PyFrameUploader(self.gpu_id)
+            self.uploader = vali.PyFrameUploader(gpu_id)
             self.dec_frame = np.ndarray(shape=(self.py_dec.HostFrameSize),
                                         dtype=np.uint8)
 

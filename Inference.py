@@ -120,7 +120,16 @@ coco_names = [
 COLORS = np.random.uniform(0, 255, size=(len(coco_names), 3))
 
 
-def save_result(res_json, idx, outputs) -> None:
+def append_detection(res_json: dict, idx: int, outputs) -> None:
+    """
+    Append detection to dictionary.
+
+    Args:
+        res_json (dict): dict with detections
+        idx (int): video frame index
+        outputs (_type_): model outputs
+    """
+
     pred_classes = [coco_names[i] for i in outputs[0]["labels"].cpu().numpy()]
     pred_scores = outputs[0]["scores"].detach().cpu().numpy()
     pred_bboxes = outputs[0]["boxes"].detach().cpu().numpy()
@@ -145,6 +154,18 @@ def inference(
     dump: bool,
     gpu_id=0,
 ) -> None:
+    """
+    Run inference on video frames.
+    This function is to be run in separate process.
+
+    Args:
+        inp_queue (Queue): video frames queue
+        model: torch inference model
+        stop_event (SyncEvent): multiprocessing event which stops this funciton
+        output(str): path to JSON with detections
+        dump (bool): flag, set up to tell adapter to dump video track
+        gpu_id (int, optional): GPU to run on. Defaults to 0.
+    """
 
     try:
         dec = Decoder.NvDecoder(inp_queue, stop_event, dump, gpu_id)
@@ -175,7 +196,7 @@ def inference(
             # Run inference.
             with torch.no_grad():
                 outputs = model(input_batch)
-                save_result(res_json, idx, outputs)
+                append_detection(res_json, idx, outputs)
                 idx += 1
 
         except Exception as e:

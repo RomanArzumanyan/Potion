@@ -151,7 +151,8 @@ def inference(
     model,
     stop_event: SyncEvent,
     output: str,
-    dump: bool,
+    dump_fname: str,
+    dump_ext: str,
     gpu_id=0,
 ) -> None:
     """
@@ -163,12 +164,14 @@ def inference(
         model: torch inference model
         stop_event (SyncEvent): multiprocessing event which stops this funciton
         output(str): path to JSON with detections
-        dump (bool): flag, set up to tell adapter to dump video track
+        dump_fname (str): dump file name, if empty no dump will be done
+        dump_ext (str): dump file dump_ext
         gpu_id (int, optional): GPU to run on. Defaults to 0.
     """
 
     try:
-        dec = Decoder.NvDecoder(inp_queue, stop_event, dump, gpu_id)
+        dec = Decoder.NvDecoder(inp_queue, stop_event,
+                                dump_fname, dump_ext, gpu_id)
     except Exception as e:
         logger.fatal(f"Failed to create decoder: {e}")
         return

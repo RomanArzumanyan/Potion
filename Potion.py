@@ -66,10 +66,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "-d",
         "--dump",
-        type=bool,
+        type=str,
         required=False,
-        default=False,
-        help="dump video track to ./dump.bin",
+        default="",
+        help="dump video filename without extension",
     )
 
     parser.add_argument(
@@ -100,7 +100,7 @@ if __name__ == "__main__":
     buf_proc_stop = mp.Event()
     buf_proc = Process(
         target=buf_class.buf_stream,
-        args=(buf_queue, buf_proc_stop)
+        args=(buf_queue, buf_proc_stop),
     )
     buf_proc.start()
 
@@ -123,6 +123,7 @@ if __name__ == "__main__":
             inf_proc_stop,
             args.output,
             args.dump,
+            buf_class.format_by_codec(),
             int(args.gpu_id),
         ),
     )

@@ -12,7 +12,7 @@ python 3 ./Potion.py \
   -i http://media.sever/rtsp_stream
   -o detections.json
   -t 5
-  -d True
+  -d dump
   -n 3
   -gpu_id 0
 ```
@@ -28,7 +28,7 @@ options:
   -o OUTPUT, --output OUTPUT
                         output json file name
   -t TIME, --time TIME  processing time, s.
-  -d DUMP, --dump DUMP  dump video track to ./dump.bin
+  -d DUMP, --dump DUMP  dump video filename without extension
   -n NUM_RETRIES, --num_retries NUM_RETRIES
                         number of attepts to respawn video reader in case of failure
 ```

@@ -134,14 +134,28 @@ class StreamBuffer:
                 self.err_cnt += 1
                 return False, FFMpegProcState.ERROR
 
+    def format_by_codec(self) -> str:
+        """
+        Get output format by codec
+
+        Returns:
+            str: format name
+        """
+
+        codec = self.params["codec"]
+        if codec == "h264" or codec == "hevc" or codec == "av1":
+            return "mpegts"
+        elif codec == "vp8" or codec == "vp9":
+            return "webm"
+        else:
+            raise RuntimeError(f"Unsupported codec: {codec}")
+
     def run_ffmpeg(self) -> None:
         """
         Run FFMpeg in subprocess and redirect output to pipe.
         """
 
         # Prepare FFMpeg arguments
-        codec = self.params["codec"]
-        bsf_name = codec + "_mp4toannexb,dump_extra=all"
         cmd = [
             "ffmpeg",
             "-hide_banner",
@@ -149,12 +163,14 @@ class StreamBuffer:
             "fatal",
             "-i",
             self.url,
+            "-map",
+            "v:0",
             "-c:v",
             "copy",
-            "-bsf:v",
-            bsf_name,
+            "-c:a",
+            "none",
             "-f",
-            codec,
+            self.format_by_codec(),
             "pipe:1",
         ]
 
@@ -163,10 +179,6 @@ class StreamBuffer:
     def ffmpeg_needs_respawn(self) -> bool:
         """
         Check if FFMpeg process needs to be respawned.
-        Don't run this method if FFMpeg process is alive.
-
-        Raises:
-            RuntimeError: if FFMpeg process is running
 
         Returns:
             bool: True if FFMpeg needs to be respawned, False otherwise.
@@ -174,7 +186,9 @@ class StreamBuffer:
 
         proc_status = self.check_update_state()
         alive = proc_status[0]
-        if not alive:
+        if alive:
+            return False
+        else:
             death_reason = proc_status[1]
             if death_reason == FFMpegProcState.EOF:
                 logger.info("FFMpeg buffering process exited normally.")
@@ -186,8 +200,6 @@ class StreamBuffer:
                     return True
                 else:
                     return False
-        else:
-            raise RuntimeError("Respawn check while FFMpeg process is alive!")
 
     def buf_stream(self, buf_queue: Queue, stop_event: SyncEvent) -> None:
         """

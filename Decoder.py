@@ -22,21 +22,22 @@ logger = logging.getLogger(__file__)
 
 
 class QueueAdapter:
-    def __init__(self, inp_queue: Queue, dump: bool, stop_event: SyncEvent,):
+    def __init__(self, inp_queue: Queue, stop_event: SyncEvent, dump_fname: str,):
         """
         Constructor
 
         Args:
             inp_queue (Queue): queue with video chunks
-            dump (bool): flag, set up to tell adapter to dump video track
             stop_event (SyncEvent): multiprocessing event which stops adapter from reading chunks from queue
+            dump_fname (str): dump file name, if empty no dump will be done
         """
 
         self.inp_queue = inp_queue
         self.stop_event = stop_event
-        self.dump = dump
-        self.f_out = open("dump.bin", "ab")
-        atexit.register(self.cleanup)
+        self.dump_fname = dump_fname
+        if len(self.dump_fname):
+            self.f_out = open(dump_fname, "ab")
+            atexit.register(self.cleanup)
 
     def cleanup(self):
         self.f_out.close()
@@ -56,7 +57,7 @@ class QueueAdapter:
         while not self.stop_event.is_set():
             try:
                 chunk = self.inp_queue.get_nowait()
-                if self.dump:
+                if len(self.dump_fname):
                     self.f_out.write(chunk)
                 return chunk
 
@@ -77,7 +78,8 @@ class NvDecoder:
     def __init__(self,
                  inp_queue: Queue,
                  stop_event: SyncEvent,
-                 dump: bool,
+                 dump_fname: str,
+                 dump_ext: str,
                  gpu_id=0,):
         """
         Constructor
@@ -85,11 +87,16 @@ class NvDecoder:
         Args:
             inp_queue (Queue): queue with video chunks
             stop_event (SyncEvent): multiprocessing event which stops adapter from reading chunks from queue
-            dump (bool): flag, set up to tell adapter to dump video track
+            dump_fname (str): dump file name, if empty no dump will be done
+            dump_ext (str): dump file dump_ext
             gpu_id (int, optional): GPU to run on. Defaults to 0.
         """
 
-        self.adapter = QueueAdapter(inp_queue, dump, stop_event)
+        fname_plus_ext = dump_fname
+        if len(fname_plus_ext):
+            fname_plus_ext += "."
+            fname_plus_ext += dump_ext
+        self.adapter = QueueAdapter(inp_queue, stop_event, fname_plus_ext)
 
         # First try to create HW-accelerated decoder.
         # Some codecs / formats may not be supported, fall back to SW decoder then.
@@ -134,14 +141,16 @@ class NvDecoder:
         """
 
         try:
+            pkt_data = vali.PacketData()
             if self.py_dec.IsAccelerated:
                 success, info = self.py_dec.DecodeSingleSurface(
-                    self.surfaces[0])
+                    self.surfaces[0], pkt_data)
                 if not success:
                     logger.error(info)
                     return None
             else:
-                success, info = self.py_dec.DecodeSingleFrame(self.dec_frame)
+                success, info = self.py_dec.DecodeSingleFrame(
+                    self.dec_frame, pkt_data)
                 if not success:
                     logger.error(info)
                     return None
@@ -152,7 +161,7 @@ class NvDecoder:
                     logger.error(info)
                     return None
 
-                # Color conversion
+            # Color conversion
             for i in range(0, len(self.convs)):
                 success, info = self.convs[i].Run(
                     self.surfaces[i], self.surfaces[i + 1])

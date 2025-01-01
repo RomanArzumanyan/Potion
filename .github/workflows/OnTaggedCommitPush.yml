@@ -12,10 +12,10 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: "3.x"
-    - name: Build a binary wheel
+    - name: Build python wheel
       run: |        
         git submodule update --init --recursive
-        python3 -m pip wheel --output-dir dist
+        python3 -m pip wheel -w dist .
       env:
         CIBW_BUILD_VERBOSITY: 1
         CIBW_PROJECT_REQUIRES_PYTHON: ">=3.10"

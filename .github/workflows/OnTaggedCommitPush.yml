@@ -52,23 +52,23 @@ jobs:
       with:
         repository-url: https://test.pypi.org/legacy/
 
-  # publish-to-pypi:
-  #   name: Publish to PyPI
-  #   needs:
-  #   - build
-  #   - publish-to-testpypi
-  #   runs-on: [ubuntu-latest]
-  #   environment:
-  #     name: pypi
-  #     url: https://pypi.org/p/python_potion
-  #   permissions:
-  #     id-token: write
+  publish-to-pypi:
+    name: Publish to PyPI
+    needs:
+    - build
+    - publish-to-testpypi
+    runs-on: [ubuntu-latest]
+    environment:
+      name: pypi
+      url: https://pypi.org/p/python_potion
+    permissions:
+      id-token: write
 
-  #   steps:
-  #   - name: Download all the dists
-  #     uses: actions/download-artifact@v4.1.7
-  #     with:
-  #       name: python-package-distributions
-  #       path: dist/
-  #   - name: Publish distribution to PyPI
-  #     uses: pypa/gh-action-pypi-publish@release/v1
+    steps:
+    - name: Download all the dists
+      uses: actions/download-artifact@v4.1.7
+      with:
+        name: python-package-distributions
+        path: dist/
+    - name: Publish distribution to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1

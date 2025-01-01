@@ -19,7 +19,7 @@ import torch
 import torchvision
 import logging
 from multiprocessing.synchronize import Event as SyncEvent
-import Decoder
+import potion.decoder as decoder
 
 logger = logging.getLogger(__file__)
 
@@ -170,7 +170,7 @@ def inference(
     """
 
     try:
-        dec = Decoder.NvDecoder(inp_queue, stop_event,
+        dec = decoder.NvDecoder(inp_queue, stop_event,
                                 dump_fname, dump_ext, gpu_id)
     except Exception as e:
         logger.fatal(f"Failed to create decoder: {e}")

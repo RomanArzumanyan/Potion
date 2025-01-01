@@ -16,8 +16,8 @@ import torchvision
 import argparse
 import logging
 import time
-import Buffering
-import Inference
+import potion.buffering as buffering
+import potion.inference as inference
 
 logger = logging.getLogger(__file__)
 
@@ -89,7 +89,7 @@ if __name__ == "__main__":
 
     # 1.1
     # Prepare video track params and variable size queue.
-    buf_class = Buffering.StreamBuffer(
+    buf_class = buffering.StreamBuffer(
         args.input, {'num_retries': args.num_retries})
     params = buf_class.get_params()
     buf_queue = Queue(maxsize=0)
@@ -116,7 +116,7 @@ if __name__ == "__main__":
     # Start inference process. It will take input from queue.
     inf_proc_stop = mp.Event()
     inf_proc = Process(
-        target=Inference.inference,
+        target=inference.inference,
         args=(
             buf_queue,
             model,

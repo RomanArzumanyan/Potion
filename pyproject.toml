@@ -1,3 +1,9 @@
+[project]
+name = "python_potion"
+authors = [{name = "Roman Arzumanyan", email = "roman.arzum@gmail.com"}]
+description = "Live video inference "
+dynamic = ["version", "dependencies", "license", "optional-dependencies", "readme"]
+
 [tool.black]
 line-length = 88
 target-version = ['py39']

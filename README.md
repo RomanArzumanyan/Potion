@@ -8,12 +8,12 @@ Use it to run your inference on network stream:
 
 Install:
 ```
-pip install https://github.com/RomanArzumanyan/Potion
+pip install python_potion
 ```
 
 Usage example:
 ```
-python3 -m potion \
+python3 -m python_potion \
   -i http://media.sever/rtsp_stream
   -o detections.json
   -t 5

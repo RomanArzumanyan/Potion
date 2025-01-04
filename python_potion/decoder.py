@@ -18,7 +18,7 @@ import logging
 from multiprocessing.synchronize import Event as SyncEvent
 import atexit
 
-logger = logging.getLogger(__file__)
+LOGGER = logging.getLogger(__file__)
 
 
 class QueueAdapter:
@@ -65,11 +65,11 @@ class QueueAdapter:
                 continue
 
             except ValueError:
-                logger.info("Queue is closed.")
+                LOGGER.info("Queue is closed.")
                 return bytes()
 
             except Exception as e:
-                logger.error(f"Unexpected excepton: {str(e)}")
+                LOGGER.error(f"Unexpected excepton: {str(e)}")
 
         return bytes()
 
@@ -105,7 +105,7 @@ class NvDecoder:
         except Exception as e:
             # No exception handling here.
             # Failure to create SW decoder is fatal.
-            logger.warning(f"Failed to create HW decoder, reason: {str(e)}")
+            LOGGER.warning(f"Failed to create HW decoder, reason: {str(e)}")
             self.py_dec = vali.PyDecoder(self.adapter, {}, gpu_id=-1)
 
         width = self.py_dec.Width
@@ -146,19 +146,19 @@ class NvDecoder:
                 success, info = self.py_dec.DecodeSingleSurface(
                     self.surfaces[0], pkt_data)
                 if not success:
-                    logger.error(info)
+                    LOGGER.error(info)
                     return None
             else:
                 success, info = self.py_dec.DecodeSingleFrame(
                     self.dec_frame, pkt_data)
                 if not success:
-                    logger.error(info)
+                    LOGGER.error(info)
                     return None
 
                 success, info = self.uploader.Run(
                     self.dec_frame, self.surfaces[0])
                 if not success:
-                    logger.error(info)
+                    LOGGER.error(info)
                     return None
 
             # Color conversion
@@ -166,11 +166,11 @@ class NvDecoder:
                 success, info = self.convs[i].Run(
                     self.surfaces[i], self.surfaces[i + 1])
                 if not success:
-                    logger.error(info)
+                    LOGGER.error(info)
                     return None
 
             return self.surfaces[2]
 
         except Exception as e:
-            logger.error(info)
+            LOGGER.error(info)
             return None

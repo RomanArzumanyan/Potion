@@ -19,9 +19,9 @@ import torch
 import torchvision
 import logging
 from multiprocessing.synchronize import Event as SyncEvent
-import potion.decoder as decoder
+import python_potion.decoder as decoder
 
-logger = logging.getLogger(__file__)
+LOGGER = logging.getLogger(__file__)
 
 coco_names = [
     "__background__",
@@ -173,7 +173,7 @@ def inference(
         dec = decoder.NvDecoder(inp_queue, stop_event,
                                 dump_fname, dump_ext, gpu_id)
     except Exception as e:
-        logger.fatal(f"Failed to create decoder: {e}")
+        LOGGER.fatal(f"Failed to create decoder: {e}")
         return
 
     idx = 0
@@ -203,7 +203,7 @@ def inference(
                 idx += 1
 
         except Exception as e:
-            logger.error(f"Unexpected exception: {str(e)}")
+            LOGGER.error(f"Unexpected exception: {str(e)}")
             break
 
     with open(output, "w") as f_out:

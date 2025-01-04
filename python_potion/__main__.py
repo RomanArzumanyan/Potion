@@ -16,15 +16,18 @@ import torchvision
 import argparse
 import logging
 import time
-import potion.buffering as buffering
-import potion.inference as inference
+import python_potion.buffering as buffering
+import python_potion.inference as inference
+import python_potion.client as image_client
+import sys
 
-logger = logging.getLogger(__file__)
+LOGGER = None
+FLAGS = None
 
 if __name__ == "__main__":
     mp.set_start_method("spawn")
 
-    logger = logging.getLogger(__name__)
+    LOGGER = logging.getLogger(__name__)
     logging.basicConfig(level=logging.INFO)
 
     parser = argparse.ArgumentParser(
@@ -38,7 +41,6 @@ if __name__ == "__main__":
         required=True,
         help="GPU id, check nvidia-smi",
     )
-
     parser.add_argument(
         "-i",
         "--input",
@@ -46,7 +48,6 @@ if __name__ == "__main__":
         required=True,
         help="Encoded video file (read from)",
     )
-
     parser.add_argument(
         "-o",
         "--output",
@@ -54,7 +55,6 @@ if __name__ == "__main__":
         required=True,
         help="output json file name",
     )
-
     parser.add_argument(
         "-t",
         "--time",
@@ -62,7 +62,6 @@ if __name__ == "__main__":
         required=True,
         help="processing time, s.",
     )
-
     parser.add_argument(
         "-d",
         "--dump",
@@ -71,7 +70,6 @@ if __name__ == "__main__":
         default="",
         help="dump video filename without extension",
     )
-
     parser.add_argument(
         "-n",
         "--num_retries",
@@ -80,17 +78,101 @@ if __name__ == "__main__":
         default=3,
         help="number of attepts to respawn video reader in case of failure",
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        required=False,
+        default=False,
+        help="Enable verbose output",
+    )
+    parser.add_argument(
+        "-a",
+        "--async",
+        dest="async_set",
+        action="store_true",
+        required=False,
+        default=False,
+        help="Use asynchronous inference API",
+    )
+    parser.add_argument(
+        "--streaming",
+        action="store_true",
+        required=False,
+        default=False,
+        help="Use streaming inference API. "
+        + "The flag is only available with gRPC protocol.",
+    )
+    parser.add_argument(
+        "-m", "--model-name", type=str, required=True, help="Name of model"
+    )
+    parser.add_argument(
+        "-x",
+        "--model-version",
+        type=str,
+        required=False,
+        default="",
+        help="Version of model. Default is to use latest version.",
+    )
+    parser.add_argument(
+        "-b",
+        "--batch-size",
+        type=int,
+        required=False,
+        default=1,
+        help="Batch size. Default is 1.",
+    )
+    parser.add_argument(
+        "-c",
+        "--classes",
+        type=int,
+        required=False,
+        default=1,
+        help="Number of class results to report. Default is 1.",
+    )
+    parser.add_argument(
+        "-s",
+        "--scaling",
+        type=str,
+        choices=["NONE", "INCEPTION", "VGG"],
+        required=False,
+        default="NONE",
+        help="Type of scaling to apply to image pixels. Default is NONE.",
+    )
+    parser.add_argument(
+        "-u",
+        "--url",
+        type=str,
+        required=False,
+        default="localhost:8000",
+        help="Inference server URL. Default is localhost:8000.",
+    )
+    parser.add_argument(
+        "-p",
+        "--protocol",
+        type=str,
+        required=False,
+        default="gRPC",
+        help="Protocol (HTTP/gRPC) used to communicate with "
+        + "the inference service. Default is gRPC.",
+    )
 
-    args = parser.parse_args()
+    FLAGS = parser.parse_args()
+
+    # Check triton server
+    try:
+        img_client = image_client.ImageClient(FLAGS)
+    except Exception:
+        sys.exit(1)
 
     # Basic agsparse validation
-    if args.gpu_id < 0:
+    if FLAGS.gpu_id < 0:
         raise RuntimeError("Invalid gpu id, must be >= 0")
 
     # 1.1
     # Prepare video track params and variable size queue.
     buf_class = buffering.StreamBuffer(
-        args.input, {'num_retries': args.num_retries})
+        FLAGS.input, {'num_retries': FLAGS.num_retries})
     params = buf_class.get_params()
     buf_queue = Queue(maxsize=0)
 
@@ -100,7 +182,7 @@ if __name__ == "__main__":
     buf_proc_stop = mp.Event()
     buf_proc = Process(
         target=buf_class.buf_stream,
-        args=(buf_queue, buf_proc_stop),
+        FLAGS=(buf_queue, buf_proc_stop),
     )
     buf_proc.start()
 
@@ -117,20 +199,20 @@ if __name__ == "__main__":
     inf_proc_stop = mp.Event()
     inf_proc = Process(
         target=inference.inference,
-        args=(
+        FLAGS=(
             buf_queue,
             model,
             inf_proc_stop,
-            args.output,
-            args.dump,
+            FLAGS.output,
+            FLAGS.dump,
             buf_class.format_by_codec(),
-            int(args.gpu_id),
+            int(FLAGS.gpu_id),
         ),
     )
     inf_proc.start()
 
     # Let the script do the job.
-    time.sleep(float(args.time))
+    time.sleep(float(FLAGS.time))
 
     # 4.1
     # Stop buf_stream process. No more chunks will be put into variable size queue.

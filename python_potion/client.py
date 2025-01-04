@@ -25,7 +25,7 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 from multiprocessing import Queue
-import multiprocessing as mp
+from queue import Empty
 import numpy as np
 import logging
 from multiprocessing.synchronize import Event as SyncEvent
@@ -34,13 +34,15 @@ import numpy as np
 import tritonclient.grpc as grpcclient
 import tritonclient.grpc.model_config_pb2 as mc
 import tritonclient.http as httpclient
+import torch
+# import torchvision
+import python_potion.decoder as decoder
 
 from functools import partial
 from tritonclient.utils import InferenceServerException, triton_to_np_dtype
 
 
 LOGGER = logging.getLogger(__file__)
-FLAGS = None
 
 
 class UserData:
@@ -48,16 +50,48 @@ class UserData:
         self._completed_requests = Queue()
 
 
+def postprocess(results, output_name, batch_size, supports_batching):
+    output_array = results.as_numpy(output_name)
+    if supports_batching and len(output_array) != batch_size:
+        raise Exception(
+            "expected {} results, got {}".format(batch_size, len(output_array))
+        )
+
+    for results in output_array:
+        if not supports_batching:
+            results = [results]
+        for result in results:
+            if output_array.dtype.type == np.object_:
+                cls = "".join(chr(x) for x in result).split(":")
+            else:
+                cls = result.split(":")
+            print("    {} ({}) = {}".format(cls[0], cls[1], cls[2]))
+
+
 class ImageClient:
-    def __init__(self, flags):
-        FLAGS = flags
+    def __init__(self, flags,
+                 output: str,
+                 dump_fname: str,
+                 dump_ext: str,
+                 gpu_id,):
+
+        self.output = output,
+        self.dump_fname = dump_fname
+        self.dump_ext = dump_ext
+        self.gpu_id = gpu_id
+
+        self.flags = flags
+
+        self.sent_cnt = 0
+        self.recv_cnt = 0
+
         self.triton_client = grpcclient.InferenceServerClient(
-            url=FLAGS.url, verbose=FLAGS.verbose
+            url=self.flags.url, verbose=self.flags.verbose
         )
 
         try:
             self.model_metadata = self.triton_client.get_model_metadata(
-                model_name=FLAGS.model_name, model_version=FLAGS.model_version
+                model_name=self.flags.model_name, model_version=self.flags.model_version
             )
         except InferenceServerException as e:
             LOGGER.fatal("failed to retrieve the metadata: " + str(e))
@@ -65,7 +99,7 @@ class ImageClient:
 
         try:
             self.model_config = self.triton_client.get_model_config(
-                model_name=FLAGS.model_name, model_version=FLAGS.model_version
+                model_name=self.flags.model_name, model_version=self.flags.model_version
             ).config
         except InferenceServerException as e:
             LOGGER.fatal("failed to retrieve the config: " + str(e))
@@ -75,57 +109,76 @@ class ImageClient:
             self.model_metadata, self.model_config
         )
 
-        supports_batching = self.max_batch_size > 0
-        if not supports_batching and FLAGS.batch_size != 1:
+        self.supports_batching = self.max_batch_size > 0
+        if not self.supports_batching and self.flags.batch_size != 1:
             LOGGER.fatal("ERROR: This model doesn't support batching.")
             raise e
 
-        # Send requests of FLAGS.batch_size images. If the number of
-        # images isn't an exact multiple of FLAGS.batch_size then just
-        # start over with the first images until the batch is filled.
-        self.requests = []
-        self.responses = []
-        self.result_filenames = []
-        self.request_ids = []
         self.batch = []
-        self.image_idx = 0
-        self.last_request = False
-        self.user_data = UserData()
-        self.batch_size = FLAGS.batch_size
+        self.batch_size = self.flags.batch_size
         self.sent_cnt = 0
         self.recv_cnt = 0
-
-        self.triton_client.start_stream(
-            partial(self.completion_callback, self.user_data))
 
     def send(self, img: np.ndarray):
         self.batch.append(img)
         if len(self.batch) == self.batch_size:
-            inf_batch = np.stack(self.batch, axis=0)
+            inf_batch = np.stack(
+                self.batch, axis=0) if self.supports_batching else img
             try:
                 self.sent_cnt += 1
                 for inputs, outputs, model_name, model_version in self.requestGenerator(
-                    inf_batch, self.input_name, self.output_name, self.dtype, FLAGS
+                    inf_batch, self.input_name, self.output_name, self.dtype
                 ):
-                    self.triton_client.async_stream_infer(
-                        FLAGS.model_name,
-                        inputs,
-                        request_id=str(self.sent_count),
-                        model_version=FLAGS.model_version,
-                        outputs=outputs,
+                    response = self.triton_client.infer(
+                        model_name, inputs, model_version, outputs, str(
+                            self.sent_cnt)
                     )
+                    postprocess(response, self.output_name,
+                                self.batch_size, self.max_batch_size > 0)
             except InferenceServerException as e:
-                LOGGER.error("inference failed: " + str(e))
+                LOGGER.error("Failed to send inference request: " + str(e))
 
-    def recv(self):
-        (results, error) = self.user_data._completed_requests.get()
-        self.recv_cnt += 1
-        if error is not None:
-            LOGGER.error("inference failed: " + str(error))
-        print(results)
+            finally:
+                self.batch.clear()
 
-    def completion_callback(self, user_data, result, error):
-        user_data._completed_requests.put((result, error))
+    def inference_client(self, inp_queue: Queue, stop_event: SyncEvent,):
+        try:
+            dec = decoder.NvDecoder(inp_queue, stop_event,
+                                    self.dump_fname, self.dump_ext, self.gpu_id)
+        except Exception as e:
+            LOGGER.fatal(f"Failed to create decoder: {e}")
+            return
+        while not stop_event.is_set():
+            try:
+                # Decode Surface
+                surf = dec.decode()
+
+                # Export to tensor
+                img_tensor = torch.from_dlpack(surf)
+                img_tensor = img_tensor.clone().detach()
+                img_tensor = img_tensor.type(dtype=torch.cuda.FloatTensor)
+                expected_shape = (self.c, self.h, self.w)
+                img_tensor.resize_(expected_shape)
+
+                # Apply transformations, preprocess
+                # img_tensor = torch.divide(img_tensor, 255.0)
+                # data_transforms = torchvision.transforms.Normalize(
+                #     mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+                # )
+                # img_tensor = data_transforms(img_tensor)
+
+                self.send(img_tensor.cpu().numpy())
+
+            except Empty:
+                continue
+
+            except ValueError:
+                LOGGER.info("Queue is closed.")
+                return bytes()
+
+            except Exception as e:
+                LOGGER.error(
+                    f"Frame {self.sent_cnt}. Unexpected excepton: {str(e)}")
 
     def parse_model(self, model_metadata, model_config):
         """
@@ -223,9 +276,8 @@ class ImageClient:
             input_metadata.datatype,
         )
 
-    @classmethod
-    def requestGenerator(batched_image_data, input_name, output_name, dtype, FLAGS):
-        protocol = FLAGS.protocol.lower()
+    def requestGenerator(self, batched_image_data, input_name, output_name, dtype):
+        protocol = self.flags.protocol.lower()
 
         if protocol == "grpc":
             client = grpcclient
@@ -238,6 +290,6 @@ class ImageClient:
         inputs[0].set_data_from_numpy(batched_image_data)
 
         outputs = [client.InferRequestedOutput(
-            output_name, class_count=FLAGS.classes)]
+            output_name, class_count=self.flags.classes)]
 
-        yield inputs, outputs, FLAGS.model_name, FLAGS.model_version
+        yield inputs, outputs, self.flags.model_name, self.flags.model_version

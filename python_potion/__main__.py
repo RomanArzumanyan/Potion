@@ -12,14 +12,11 @@
 
 from multiprocessing import Queue, Process
 import multiprocessing as mp
-import torchvision
 import argparse
 import logging
 import time
 import python_potion.buffering as buffering
-import python_potion.inference as inference
 import python_potion.client as image_client
-import sys
 
 LOGGER = None
 FLAGS = None
@@ -183,16 +180,15 @@ if __name__ == "__main__":
     # Start inference process. It will take input from queue, decode and send
     # images to triton inference server.
     inf_class = image_client.ImageClient(FLAGS,
-                                         FLAGS.output, FLAGS.dump,
-                                         buf_class.format_by_codec(),
-                                         FLAGS.gpu_id)
+                                         buf_class.format_by_codec())
 
     inf_proc_stop = mp.Event()
-    inf_proc = Process(
-        target=inf_class.inference_client,
-        args=(buf_queue, inf_proc_stop),
-    )
-    inf_proc.start()
+    inf_class.inference_client(buf_queue, inf_proc_stop)
+    # inf_proc = Process(
+    #     target=inf_class.inference_client,
+    #     args=(buf_queue, inf_proc_stop),
+    # )
+    # inf_proc.start()
 
     # Let the script do the job.
     time.sleep(float(FLAGS.time))

@@ -108,22 +108,8 @@ class NvDecoder:
             LOGGER.warning(f"Failed to create HW decoder, reason: {str(e)}")
             self.py_dec = vali.PyDecoder(self.adapter, {}, gpu_id=-1)
 
-        width = self.py_dec.Width
-        height = self.py_dec.Height
-
-        self.surfaces = [
-            vali.Surface.Make(self.py_dec.Format, width, height, gpu_id),
-            vali.Surface.Make(vali.PixelFormat.RGB, width, height, gpu_id),
-            vali.Surface.Make(vali.PixelFormat.RGB_PLANAR,
-                              width, height, gpu_id),
-        ]
-
-        self.convs = [
-            vali.PySurfaceConverter(
-                self.surfaces[0].Format, self.surfaces[1].Format, gpu_id),
-            vali.PySurfaceConverter(
-                self.surfaces[1].Format, self.surfaces[2].Format, gpu_id),
-        ]
+        self.surf = vali.Surface.Make(
+            self.py_dec.Format, self.py_dec.Width, self.py_dec.Height, gpu_id)
 
         # SW decoder outputs to numpy array.
         # Have to initialize uploader to keep decoded frames always in vRAM.
@@ -144,7 +130,7 @@ class NvDecoder:
             pkt_data = vali.PacketData()
             if self.py_dec.IsAccelerated:
                 success, info = self.py_dec.DecodeSingleSurface(
-                    self.surfaces[0], pkt_data)
+                    self.surf, pkt_data)
                 if not success:
                     LOGGER.error(info)
                     return None
@@ -156,20 +142,12 @@ class NvDecoder:
                     return None
 
                 success, info = self.uploader.Run(
-                    self.dec_frame, self.surfaces[0])
+                    self.dec_frame, self.surf)
                 if not success:
                     LOGGER.error(info)
                     return None
 
-            # Color conversion
-            for i in range(0, len(self.convs)):
-                success, info = self.convs[i].Run(
-                    self.surfaces[i], self.surfaces[i + 1])
-                if not success:
-                    LOGGER.error(info)
-                    return None
-
-            return self.surfaces[2]
+            return self.surf
 
         except Exception as e:
             LOGGER.error(info)

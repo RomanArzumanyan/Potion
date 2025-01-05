@@ -34,11 +34,10 @@ import numpy as np
 import tritonclient.grpc as grpcclient
 import tritonclient.grpc.model_config_pb2 as mc
 import tritonclient.http as httpclient
-import torch
-# import torchvision
 import python_potion.decoder as decoder
+import python_potion.converter as converter
+import python_vali as vali
 
-from functools import partial
 from tritonclient.utils import InferenceServerException, triton_to_np_dtype
 
 
@@ -70,20 +69,21 @@ def postprocess(results, output_name, batch_size, supports_batching):
 
 class ImageClient:
     def __init__(self, flags,
-                 output: str,
-                 dump_fname: str,
-                 dump_ext: str,
-                 gpu_id,):
+                 dump_ext: str,):
 
-        self.output = output,
-        self.dump_fname = dump_fname
+        self.output = flags.output,
+        self.dump_fname = flags.dump
         self.dump_ext = dump_ext
-        self.gpu_id = gpu_id
+        self.gpu_id = flags.gpu_id
 
         self.flags = flags
 
         self.sent_cnt = 0
         self.recv_cnt = 0
+
+        self.res = vali.PySurfaceResizer(
+            vali.PixelFormat.RGB_32F, flags.gpu_id)
+        self.dwn = vali.PySurfaceDownloader(flags.gpu_id)
 
         self.triton_client = grpcclient.InferenceServerClient(
             url=self.flags.url, verbose=self.flags.verbose
@@ -148,26 +148,40 @@ class ImageClient:
         except Exception as e:
             LOGGER.fatal(f"Failed to create decoder: {e}")
             return
+
+        # Lazy init will be done
+        conv = None
+        surf_dst = vali.Surface.Make(vali.PixelFormat.RGB_32F_PLANAR,
+                                     self.w, self.h, gpu_id=0)
         while not stop_event.is_set():
             try:
                 # Decode Surface
-                surf = dec.decode()
+                surf_src = dec.decode()
 
-                # Export to tensor
-                img_tensor = torch.from_dlpack(surf)
-                img_tensor = img_tensor.clone().detach()
-                img_tensor = img_tensor.type(dtype=torch.cuda.FloatTensor)
-                expected_shape = (self.c, self.h, self.w)
-                img_tensor.resize_(expected_shape)
+                # Process to match NN expectations
+                if not conv:
+                    params = {
+                        "src_fmt": surf_src.Format,
+                        "dst_fmt": surf_dst.Format,
+                        "src_w": surf_src.Width,
+                        "src_h": surf_src.Height,
+                        "dst_w": surf_dst.Width,
+                        "dst_h": surf_dst.Height
+                    }
+                    conv = converter.Converter(params, self.gpu_id)
 
-                # Apply transformations, preprocess
-                # img_tensor = torch.divide(img_tensor, 255.0)
-                # data_transforms = torchvision.transforms.Normalize(
-                #     mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-                # )
-                # img_tensor = data_transforms(img_tensor)
+                conv.run(surf_src, surf_dst)
 
-                self.send(img_tensor.cpu().numpy())
+                # Download to numpy array
+                img = np.ndarray(
+                    shape=(self.c, self.h, self.w), dtype=np.float32)
+                success, info = self.dwn.Run(surf_dst, img)
+                if not success:
+                    LOGGER.error(f"Failed to download surface: {info}")
+                    continue
+
+                # Send for inference
+                self.send(img)
 
             except Empty:
                 continue

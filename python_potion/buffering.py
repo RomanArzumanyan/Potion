@@ -234,4 +234,9 @@ class StreamBuffer:
             except EOFError:
                 continue
 
+        buf_queue.put(None)
+
+        buf_queue.close()
+        buf_queue.join_thread()
+
         self.proc.terminate()

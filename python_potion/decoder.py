@@ -22,18 +22,17 @@ LOGGER = logging.getLogger(__file__)
 
 
 class QueueAdapter:
-    def __init__(self, inp_queue: Queue, stop_event: SyncEvent, dump_fname: str,):
+    def __init__(self, inp_queue: Queue, dump_fname: str,):
         """
         Constructor
 
         Args:
             inp_queue (Queue): queue with video chunks
-            stop_event (SyncEvent): multiprocessing event which stops adapter from reading chunks from queue
             dump_fname (str): dump file name, if empty no dump will be done
         """
 
+        self.all_done = False
         self.inp_queue = inp_queue
-        self.stop_event = stop_event
         self.dump_fname = dump_fname
         if len(self.dump_fname):
             self.f_out = open(dump_fname, "ab")
@@ -46,6 +45,7 @@ class QueueAdapter:
         """
         Simple adapter which meets the vali.PyDecoder readable object interface.
         It takes chunks from queue and gives them to decoder.
+        Empty bytearray put into queue serves as 'all done' flag.
 
         Args:
             size (int): requested read size
@@ -54,30 +54,34 @@ class QueueAdapter:
             bytes: compressed video bytes
         """
 
-        while not self.stop_event.is_set():
+        while not self.all_done:
             try:
-                chunk = self.inp_queue.get_nowait()
+                chunk = self.inp_queue.get(timeout=0.1)
+
+                if chunk is None:
+                    self.all_done = True
+                    return bytearray()
+
                 if len(self.dump_fname):
                     self.f_out.write(chunk)
+
                 return chunk
 
             except Empty:
                 continue
 
             except ValueError:
-                LOGGER.info("Queue is closed.")
-                return bytes()
+                break
 
             except Exception as e:
                 LOGGER.error(f"Unexpected excepton: {str(e)}")
 
-        return bytes()
+        return bytearray()
 
 
 class NvDecoder:
     def __init__(self,
                  inp_queue: Queue,
-                 stop_event: SyncEvent,
                  dump_fname: str,
                  dump_ext: str,
                  gpu_id=0,):
@@ -86,7 +90,6 @@ class NvDecoder:
 
         Args:
             inp_queue (Queue): queue with video chunks
-            stop_event (SyncEvent): multiprocessing event which stops adapter from reading chunks from queue
             dump_fname (str): dump file name, if empty no dump will be done
             dump_ext (str): dump file dump_ext
             gpu_id (int, optional): GPU to run on. Defaults to 0.
@@ -96,7 +99,8 @@ class NvDecoder:
         if len(fname_plus_ext):
             fname_plus_ext += "."
             fname_plus_ext += dump_ext
-        self.adapter = QueueAdapter(inp_queue, stop_event, fname_plus_ext)
+
+        self.adapter = QueueAdapter(inp_queue, fname_plus_ext)
 
         # First try to create HW-accelerated decoder.
         # Some codecs / formats may not be supported, fall back to SW decoder then.
@@ -120,7 +124,7 @@ class NvDecoder:
 
     def decode(self) -> vali.Surface:
         """
-        Decode single video frame
+        Decode single video frame. When decoding is done, will return None.
 
         Returns:
             vali.Surface: Surface with reconstructed pixels.
@@ -131,24 +135,27 @@ class NvDecoder:
             if self.py_dec.IsAccelerated:
                 success, info = self.py_dec.DecodeSingleSurface(
                     self.surf, pkt_data)
+
+                if info == vali.TaskExecInfo.END_OF_STREAM:
+                    return None
+
                 if not success:
-                    LOGGER.error(info)
+                    LOGGER.error(f"Failed to decode surface: {info}")
                     return None
             else:
                 success, info = self.py_dec.DecodeSingleFrame(
                     self.dec_frame, pkt_data)
                 if not success:
-                    LOGGER.error(info)
+                    LOGGER.error(f"Failed to decode frame: {info}")
                     return None
 
-                success, info = self.uploader.Run(
-                    self.dec_frame, self.surf)
+                success, info = self.uploader.Run(self.dec_frame, self.surf)
                 if not success:
-                    LOGGER.error(info)
+                    LOGGER.error(f"Failed to upload frame: {info}")
                     return None
 
             return self.surf
 
         except Exception as e:
-            LOGGER.error(info)
+            LOGGER.error(f"Unexpected exception: {str(e)}")
             return None

@@ -14,7 +14,6 @@ from multiprocessing import Queue, Process
 import multiprocessing as mp
 import argparse
 import logging
-import time
 import python_potion.buffering as buffering
 import python_potion.client as image_client
 
@@ -46,13 +45,6 @@ if __name__ == "__main__":
         help="Encoded video file (read from)",
     )
     parser.add_argument(
-        "-o",
-        "--output",
-        type=str,
-        required=True,
-        help="output json file name",
-    )
-    parser.add_argument(
         "-t",
         "--time",
         type=str,
@@ -82,23 +74,6 @@ if __name__ == "__main__":
         required=False,
         default=False,
         help="Enable verbose output",
-    )
-    parser.add_argument(
-        "-a",
-        "--async",
-        dest="async_set",
-        action="store_true",
-        required=False,
-        default=False,
-        help="Use asynchronous inference API",
-    )
-    parser.add_argument(
-        "--streaming",
-        action="store_true",
-        required=False,
-        default=False,
-        help="Use streaming inference API. "
-        + "The flag is only available with gRPC protocol.",
     )
     parser.add_argument(
         "-m", "--model-name", type=str, required=True, help="Name of model"
@@ -177,35 +152,14 @@ if __name__ == "__main__":
     buf_proc.start()
 
     # 2.1
-    # Start inference process. It will take input from queue, decode and send
-    # images to triton inference server.
-    inf_class = image_client.ImageClient(FLAGS,
-                                         buf_class.format_by_codec())
+    # Start inference in current process.
+    # It will take input from queue, decode and send images to triton inference server.
+    client = image_client.ImageClient(FLAGS,
+                                      buf_class.format_by_codec())
 
-    inf_proc_stop = mp.Event()
-    inf_class.inference_client(buf_queue, inf_proc_stop)
-    # inf_proc = Process(
-    #     target=inf_class.inference_client,
-    #     args=(buf_queue, inf_proc_stop),
-    # )
-    # inf_proc.start()
-
-    # Let the script do the job.
-    time.sleep(float(FLAGS.time))
+    # 2.2 Inference client will signal buf_proc to stop after timeout
+    client.inference_client(buf_queue, float(FLAGS.time), buf_proc_stop)
 
     # 3.1
-    # Stop buf_stream process. No more chunks will be put into queue.
-    buf_proc_stop.set()
+    # Stop buf_stream process.
     buf_proc.join()
-
-    # 3.2
-    # Wait for all chunks to be read from variable size queue.
-    # Then close it to prevent reading chunks in endless loop.
-    while buf_queue.qsize():
-        print(f"Buffer size: {buf_queue.qsize()} chunks left")
-        time.sleep(0.1)
-
-    # 4.1
-    # Stop inference process.
-    inf_proc_stop.set()
-    inf_proc.join()

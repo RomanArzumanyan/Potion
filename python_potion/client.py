@@ -24,10 +24,10 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from multiprocessing import Queue
 from queue import Empty
 import numpy as np
 import logging
+from multiprocessing import Queue
 from multiprocessing.synchronize import Event as SyncEvent
 
 import numpy as np
@@ -37,8 +37,9 @@ import tritonclient.http as httpclient
 import python_potion.decoder as decoder
 import python_potion.converter as converter
 import python_vali as vali
+import time
 
-from tritonclient.utils import InferenceServerException, triton_to_np_dtype
+from tritonclient.utils import InferenceServerException
 
 
 LOGGER = logging.getLogger(__file__)
@@ -67,11 +68,10 @@ def postprocess(results, output_name, batch_size, supports_batching):
             print("    {} ({}) = {}".format(cls[0], cls[1], cls[2]))
 
 
-class ImageClient:
+class ImageClient():
     def __init__(self, flags,
                  dump_ext: str,):
 
-        self.output = flags.output,
         self.dump_fname = flags.dump
         self.dump_ext = dump_ext
         self.gpu_id = flags.gpu_id
@@ -141,10 +141,15 @@ class ImageClient:
             finally:
                 self.batch.clear()
 
-    def inference_client(self, inp_queue: Queue, stop_event: SyncEvent,):
+    def inference_client(self, inp_queue: Queue, runtime: float,
+                         buf_stop: SyncEvent,):
         try:
-            dec = decoder.NvDecoder(inp_queue, stop_event,
-                                    self.dump_fname, self.dump_ext, self.gpu_id)
+            dec = decoder.NvDecoder(
+                inp_queue,
+                self.dump_fname,
+                self.dump_ext,
+                self.gpu_id)
+
         except Exception as e:
             LOGGER.fatal(f"Failed to create decoder: {e}")
             return
@@ -153,10 +158,17 @@ class ImageClient:
         conv = None
         surf_dst = vali.Surface.Make(vali.PixelFormat.RGB_32F_PLANAR,
                                      self.w, self.h, gpu_id=0)
-        while not stop_event.is_set():
+        start = time.time()
+        while True:
+            # Signal stop
+            if time.time() - start > runtime:
+                buf_stop.set()
+
             try:
                 # Decode Surface
                 surf_src = dec.decode()
+                if surf_src is None:
+                    return
 
                 # Process to match NN expectations
                 if not conv:
@@ -183,16 +195,10 @@ class ImageClient:
                 # Send for inference
                 self.send(img)
 
-            except Empty:
-                continue
-
-            except ValueError:
-                LOGGER.info("Queue is closed.")
-                return bytes()
-
             except Exception as e:
                 LOGGER.error(
                     f"Frame {self.sent_cnt}. Unexpected excepton: {str(e)}")
+                return
 
     def parse_model(self, model_metadata, model_config):
         """

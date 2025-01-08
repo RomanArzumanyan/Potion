@@ -22,7 +22,7 @@ import logging
 from enum import Enum
 from multiprocessing.synchronize import Event as SyncEvent
 
-logger = logging.getLogger(__file__)
+LOGGER = logging.getLogger(__file__)
 
 
 class FFMpegProcState(Enum):
@@ -191,11 +191,11 @@ class StreamBuffer:
         else:
             death_reason = proc_status[1]
             if death_reason == FFMpegProcState.EOF:
-                logger.info("FFMpeg buffering process exited normally.")
+                LOGGER.info("FFMpeg buffering process exited normally.")
                 return False
             else:
                 if self.err_cnt < self.num_retries:
-                    logger.warning(
+                    LOGGER.warning(
                         f"FFMpeg process respawn: {self.err_cnt} of {self.num_retries}")
                     return True
                 else:
@@ -233,5 +233,10 @@ class StreamBuffer:
 
             except EOFError:
                 continue
+
+        buf_queue.put(None)
+
+        buf_queue.close()
+        buf_queue.join_thread()
 
         self.proc.terminate()

@@ -38,6 +38,7 @@ import python_potion.decoder as decoder
 import python_potion.converter as converter
 import python_vali as vali
 import time
+import asyncio
 
 from tritonclient.utils import InferenceServerException
 
@@ -119,7 +120,7 @@ class ImageClient():
         self.sent_cnt = 0
         self.recv_cnt = 0
 
-    def send(self, img: np.ndarray):
+    async def send(self, img: np.ndarray):
         self.batch.append(img)
         if len(self.batch) == self.batch_size:
             inf_batch = np.stack(
@@ -154,6 +155,10 @@ class ImageClient():
             LOGGER.fatal(f"Failed to create decoder: {e}")
             return
 
+        # Asyncio loop and tasks for send coroutines
+        loop = asyncio.get_event_loop()
+        tasks = []
+
         # Lazy init will be done
         conv = None
         surf_dst = vali.Surface.Make(vali.PixelFormat.RGB_32F_PLANAR,
@@ -168,7 +173,7 @@ class ImageClient():
                 # Decode Surface
                 surf_src = dec.decode()
                 if surf_src is None:
-                    return
+                    break
 
                 # Process to match NN expectations
                 if not conv:
@@ -192,13 +197,16 @@ class ImageClient():
                     LOGGER.error(f"Failed to download surface: {info}")
                     continue
 
-                # Send for inference
-                self.send(img)
+                # Async send for inference
+                tasks.append(loop.create_task(self.send(img)))
 
             except Exception as e:
                 LOGGER.error(
                     f"Frame {self.sent_cnt}. Unexpected excepton: {str(e)}")
-                return
+                break
+
+        loop.run_until_complete(asyncio.wait(tasks))
+        loop.close()
 
     def parse_model(self, model_metadata, model_config):
         """

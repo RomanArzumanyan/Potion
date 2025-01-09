@@ -109,7 +109,7 @@ if __name__ == "__main__":
         choices=["NONE", "INCEPTION", "VGG"],
         required=False,
         default="NONE",
-        help="Type of scaling to apply to image pixels. Default is NONE.",
+        help="Type of scaling to apply to image pixels. For now it is NONE.",
     )
     parser.add_argument(
         "-u",
@@ -125,8 +125,8 @@ if __name__ == "__main__":
         type=str,
         required=False,
         default="gRPC",
-        help="Protocol (HTTP/gRPC) used to communicate with "
-        + "the inference service. Default is gRPC.",
+        help="Protocol used to communicate with "
+        + "the inference service. For now it is gRPC only.",
     )
 
     FLAGS = parser.parse_args()

@@ -3,7 +3,7 @@ from setuptools import setup
 
 setup(
     name='python_potion',
-    version='0.2.0-5',
+    version='0.2.0-6',
     description='Live video inference tool',
     long_description=open('README.md').read(),
     long_description_content_type='text/markdown',

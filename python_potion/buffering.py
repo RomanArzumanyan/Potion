@@ -191,7 +191,6 @@ class StreamBuffer:
         else:
             death_reason = proc_status[1]
             if death_reason == FFMpegProcState.EOF:
-                LOGGER.info("FFMpeg buffering process exited normally.")
                 return False
             else:
                 if self.err_cnt < self.num_retries:

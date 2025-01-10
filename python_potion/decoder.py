@@ -15,7 +15,6 @@ from queue import Empty
 from multiprocessing import Queue
 import numpy as np
 import logging
-from multiprocessing.synchronize import Event as SyncEvent
 import atexit
 
 LOGGER = logging.getLogger(__file__)
@@ -84,7 +83,8 @@ class NvDecoder:
                  inp_queue: Queue,
                  dump_fname: str,
                  dump_ext: str,
-                 gpu_id=0,):
+                 gpu_id=0,
+                 async_depth=1):
         """
         Constructor
 
@@ -93,47 +93,108 @@ class NvDecoder:
             dump_fname (str): dump file name, if empty no dump will be done
             dump_ext (str): dump file dump_ext
             gpu_id (int, optional): GPU to run on. Defaults to 0.
+            async_depth (int, optional): amount of available async tasks. Defaults to 1
         """
 
+        # Generate dump filename with extension
         fname_plus_ext = dump_fname
         if len(fname_plus_ext):
             fname_plus_ext += "."
             fname_plus_ext += dump_ext
 
+        # Adapter that allows decoder to read video track chunks from queue
         self.adapter = QueueAdapter(inp_queue, fname_plus_ext)
 
         # First try to create HW-accelerated decoder.
-        # Some codecs / formats may not be supported, fall back to SW decoder then.
+        # Some codecs / formats may not be supported, fall back to SW decoder.
         try:
             self.py_dec = vali.PyDecoder(self.adapter, {}, gpu_id)
-        except Exception as e:
+        except Exception:
             # No exception handling here.
             # Failure to create SW decoder is fatal.
             self.py_dec = vali.PyDecoder(self.adapter, {}, gpu_id=-1)
 
-        self.surf = vali.Surface.Make(
-            self.py_dec.Format, self.py_dec.Width, self.py_dec.Height, gpu_id)
+        # Allocate surfaces
+        self.async_depth = async_depth
+        self.dec_pool = Queue(maxsize=self.async_depth)
+        for i in range(0, self.async_depth):
+            surf = vali.Surface.Make(
+                self.py_dec.Format, self.py_dec.Width, self.py_dec.Height, gpu_id)
+            self.dec_pool.put(surf)
 
         # SW decoder outputs to numpy array.
-        # Have to initialize uploader to keep decoded frames always in vRAM.
+        # Have to initialize uploader to keep decoded frames in vRAM.
         if not self.py_dec.IsAccelerated:
             self.uploader = vali.PyFrameUploader(gpu_id)
-            self.dec_frame = np.ndarray(shape=(self.py_dec.HostFrameSize),
-                                        dtype=np.uint8)
 
-    def decode(self) -> vali.Surface:
+    def width(self) -> int:
         """
-        Decode single video frame. When decoding is done, will return None.
+        Get width
+
+        Returns:
+            int: decoded frame width in pixels
+        """
+        return self.py_dec.Width
+
+    def height(self) -> int:
+        """
+        Get height
+
+        Returns:
+            int: decoded frame height in pixels
+        """
+        return self.py_dec.Height
+
+    def format(self) -> vali.PixelFormat:
+        """
+        Get decoder pixel format
+
+        Returns:
+            vali.PixelFormat: decoder format
+        """
+        return self.py_dec.Format
+
+    def async_depth(self) -> int:
+        """
+        Get amount of async decode tasks that can be run concurently in any
+        given moment of time.
+
+        Returns:
+            int: decoder async depth
+        """
+        return self.async_depth
+
+    async def unlock(self, surf: vali.Surface):
+        """
+        Returs surface back to decoder pool. Will not return until surface is
+        put back to decoder pool. \\
+        
+        Use it together with :func:`NvDecoder.decode_lock`
+
+        Args:
+            surf (vali.Surface): surface to return.
+        """
+        self.dec_pool.put(surf)
+
+    async def decode_lock(self) -> vali.Surface:
+        """
+        Decode single video frame. Use it together with :func:`NvDecoder.unlock` \\
+        Blocks until there's available surface in decoder pool. \\
+        Will return None upon EOF or decoding error.
+
+        You can launch multiple tasks with asyncio. \\
+        Amount of tasks to be run in any given moment of time is equal to
+        async_depth.
 
         Returns:
             vali.Surface: Surface with reconstructed pixels.
         """
 
         try:
-            pkt_data = vali.PacketData()
+            surf = self.dec_pool.get()
+
             if self.py_dec.IsAccelerated:
-                success, info = self.py_dec.DecodeSingleSurface(
-                    self.surf, pkt_data)
+                success, info = self.py_dec.DecodeSingleSurface(surf)
 
                 if info == vali.TaskExecInfo.END_OF_STREAM:
                     return None
@@ -142,18 +203,19 @@ class NvDecoder:
                     LOGGER.error(f"Failed to decode surface: {info}")
                     return None
             else:
-                success, info = self.py_dec.DecodeSingleFrame(
-                    self.dec_frame, pkt_data)
+                dec_frame = np.ndarray(shape=(self.py_dec.HostFrameSize),
+                                       dtype=np.uint8)
+                success, info = self.py_dec.DecodeSingleFrame(dec_frame)
                 if not success:
                     LOGGER.error(f"Failed to decode frame: {info}")
                     return None
 
-                success, info = self.uploader.Run(self.dec_frame, self.surf)
+                success, info = self.uploader.Run(dec_frame, surf)
                 if not success:
                     LOGGER.error(f"Failed to upload frame: {info}")
                     return None
 
-            return self.surf
+            return surf
 
         except Exception as e:
             LOGGER.error(f"Unexpected exception: {str(e)}")

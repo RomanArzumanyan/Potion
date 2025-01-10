@@ -13,18 +13,58 @@
 import python_vali as vali
 import logging
 from typing import Dict
+from multiprocessing import Queue
 
 LOGGER = logging.getLogger(__file__)
 
 
+class SurfaceStorage:
+    def __init__(self, surf: list[vali.Surface], max_size: int):
+        """
+        Create pool of surfaces list of given size.
+
+        Args:
+            surf (list[vali.Surface]): surfaces to copy / paste into pool
+            max_size (int): pool size
+        """
+        self.pool = Queue(maxsize=max_size)
+        self.size = max_size
+
+        for i in range(0, max_size):
+            copy = []
+            copy.append(surf.Clone() for surf in surf)
+            self.pool.put(copy)
+
+    def get_lock(self) -> list[vali.Surface]:
+        """
+        Get surfaces from pool
+        Use together with :func:`SurfaceStorage.put_unlock`
+
+        Returns:
+            list[vali.Surface]: Surfaces for use.
+        """
+        return self.pool.get()
+
+    def put_unlock(self, surf: list[vali.Surface]) -> None:
+        """
+        Give surfaces back to pool.
+        Use together with :func:`SurfaceStorage.get_lock`
+
+        Args:
+            surf (list[vali.Surface]): surfaces to put back into pool
+        """
+        self.pool.put(surf)
+
+
 class Converter:
-    def __init__(self, params: Dict, gpu_id: int):
+    def __init__(self, params: Dict, gpu_id=0, async_dept=1):
         """
         Constructor
 
         Args:
             params (Dict): dictionary with parameters
-            gpu_id (int): GPU id to run on
+            gpu_id (int, optional): GPU to run on. Defaults to 0
+            async_depth (int, optional): amount of available async tasks. Defaults to 1
 
         Raises:
             RuntimeError: if input or output formats aren't supported
@@ -51,7 +91,7 @@ class Converter:
                               f"Supported formats: {fmts}")
 
         # Surfaces for conversion chain
-        self.surf = [
+        surf = [
             vali.Surface.Make(vali.PixelFormat.RGB,
                               self.dst_w, self.dst_h, gpu_id)
         ]
@@ -60,7 +100,7 @@ class Converter:
         if self.need_resize:
             # Resize input Surface to decrease amount of pixels to be further processed
             self.resz = vali.PySurfaceResizer(self.src_fmt, gpu_id)
-            self.surf.insert(0, vali.Surface.Make(
+            surf.insert(0, vali.Surface.Make(
                 self.src_fmt, self.dst_w, self.dst_h, gpu_id))
 
         # Converters
@@ -73,7 +113,7 @@ class Converter:
         ]
 
         if self.dst_fmt == vali.PixelFormat.RGB_32F_PLANAR:
-            self.surf.append(
+            surf.append(
                 vali.Surface.Make(
                     vali.PixelFormat.RGB_32F, self.dst_w, self.dst_h, gpu_id)
             )
@@ -83,46 +123,65 @@ class Converter:
                     vali.PixelFormat.RGB_32F, vali.PixelFormat.RGB_32F_PLANAR, gpu_id)
             )
 
-    def run(self, surf_src: vali.Surface, surf_dst: vali.Surface) -> None:
+        surf.append(vali.Surface.Make(
+            self.dst_fmt, self.dst_w, self.dst_h, gpu_id))
+        self.pool = SurfaceStorage(surf, async_dept)
+
+    def async_depth(self) -> int:
         """
-        Runs color conversion and resize if necessary
+        Get amount of async tasks that can be run concurently in any
+        given moment of time.
+
+        Returns:
+            int: converter async depth
+        """
+        return self.pool.size
+
+    async def unlock(self, surf: list[vali.Surface]) -> None:
+        """
+        Put surfaces back to pool
+
+        Args:
+            surf (list[vali.Surface]): list of surfaces to return
+        """
+        self.pool.put_unlock(surf)
+
+    async def cvt_lock(self, surf_src: vali.Surface,) -> list[vali.Surface]:
+        """
+        Runs color conversion and resize if necessary.
+        Use it together with :func:`Converter.unlock`.
 
         Args:
             surf_src (vali.Surface): input surface
-            surf_dst (vali.Surface): output surface
 
         Raises:
             RuntimeError: in case of size / format mismatch
-        """
 
-        if surf_dst.Width != self.dst_w or surf_dst.Height != self.dst_h:
-            raise RuntimeError("Output surface size mismatch")
+        Returns:
+            list[vali.Surface]: list of surface, you need the last one
+        """
 
         if surf_src.Width != self.src_w or surf_src.Height != self.src_h:
             raise RuntimeError("Input surface size mismatch")
 
-        if surf_dst.Format != self.dst_fmt:
-            raise RuntimeError("Output surface format mismatch")
-
         if surf_src.Format != self.src_fmt:
             raise RuntimeError("Input surface format mismatch")
 
-        # Important:
-        # Input and output surfaces will be temporarily insert into list
-        # to avoid indices joggling.
+        # Take next available surface list from pool
+        surf = self.pool.get_lock()
 
         # Resize
         if self.need_resize:
-            self.surf.insert(0, surf_src)
-            success, info = self.resz.Run(self.surf[0], self.surf[1])
-            self.surf.pop(0)
+            success, info = self.resz.Run(surf_src, surf[0])
             if not success:
                 LOGGER.error(f"Failed to resize surface: {info}")
+                return None
 
         # Color conversion
-        self.surf.append(surf_dst)
         for i in range(0, len(self.conv)):
-            success, info = self.conv[i].Run(self.surf[i], self.surf[i+1])
+            success, info = self.conv[i].Run(surf[i], surf[i+1])
             if not success:
                 LOGGER.error(f"Failed to convert surface: {info}")
-        self.surf.pop()
+                return None
+
+        return surf

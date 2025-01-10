@@ -24,7 +24,6 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from queue import Empty
 import numpy as np
 import logging
 from multiprocessing import Queue
@@ -135,6 +134,34 @@ class ImageClient():
         except InferenceServerException as e:
             LOGGER.error("Failed to send inference request: " + str(e))
 
+    async def _single_request(self) -> None:
+        """
+        Make single inference request
+        """
+
+        # Decode frame
+        surf_src = await self.dec.decode_lock()
+        if not surf_src:
+            return
+
+        # Process to match NN expectations
+        surf = await self.conv.cvt_lock(surf_src)
+        if not surf:
+            return
+
+        # Download and send
+        img = np.ndarray(shape=(self.c, self.h, self.w), dtype=np.float32)
+        success, info = self.dwn.Run(surf[-1], img)
+        if not success:
+            LOGGER.error(f"Failed to download surface: {info}")
+            return
+
+        await self._send(img.copy())
+
+        # Return surfaces back to pool
+        self.dec.unlock(surf_src)
+        self.conv.unlock(surf)
+
     def run_loop(self, inp_queue: Queue, buf_stop: SyncEvent,) -> None:
         """
         Inference loop.
@@ -146,11 +173,23 @@ class ImageClient():
         """
 
         try:
-            dec = decoder.NvDecoder(
+            async_depth = 4
+            self.dec = decoder.NvDecoder(
                 inp_queue,
                 self.dump_fname,
                 self.dump_ext,
-                self.gpu_id)
+                self.gpu_id,
+                async_depth)
+
+            params = {
+                "src_fmt": self.dec.format(),
+                "dst_fmt": vali.PixelFormat.RGB_32F_PLANAR,
+                "src_w": self.dec.width(),
+                "src_h": self.dec.height(),
+                "dst_w": self.w,
+                "dst_h": self.h
+            }
+            self.conv = converter.Converter(params, self.gpu_id, async_depth)
 
         except Exception as e:
             LOGGER.fatal(f"Failed to create decoder: {e}")
@@ -160,11 +199,7 @@ class ImageClient():
         loop = asyncio.get_event_loop()
         tasks = []
 
-        # Lazy init will be done
-        conv = None
-        surf_dst = vali.Surface.Make(vali.PixelFormat.RGB_32F_PLANAR,
-                                     self.w, self.h, gpu_id=0)
-
+        # Do the job until we run out of time
         runtime = float(self.flags.time)
         start = time.time()
         while True:
@@ -173,35 +208,8 @@ class ImageClient():
                 buf_stop.set()
 
             try:
-                # Decode Surface
-                surf_src = dec.decode()
-                if surf_src is None:
-                    break
-
-                # Process to match NN expectations
-                if not conv:
-                    params = {
-                        "src_fmt": surf_src.Format,
-                        "dst_fmt": surf_dst.Format,
-                        "src_w": surf_src.Width,
-                        "src_h": surf_src.Height,
-                        "dst_w": surf_dst.Width,
-                        "dst_h": surf_dst.Height
-                    }
-                    conv = converter.Converter(params, self.gpu_id)
-
-                conv.run(surf_src, surf_dst)
-
-                # Download to numpy array
-                img = np.ndarray(
-                    shape=(self.c, self.h, self.w), dtype=np.float32)
-                success, info = self.dwn.Run(surf_dst, img)
-                if not success:
-                    LOGGER.error(f"Failed to download surface: {info}")
-                    continue
-
                 # Async send for inference
-                tasks.append(loop.create_task(self._send(img.copy())))
+                tasks.append(loop.create_task(self._single_request()))
 
             except Exception as e:
                 LOGGER.error(

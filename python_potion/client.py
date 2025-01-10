@@ -47,37 +47,6 @@ from argparse import Namespace
 LOGGER = logging.getLogger(__file__)
 
 
-def _process(results, output_name: str, batch_size: int, supports_batching: bool):
-    """
-    Process inference result and put it into stdout.
-
-    Args:
-        results (_type_): Inference result returned by Triton sever
-        output_name (str): output name
-        batch_size (int): model batch size
-        supports_batching (bool): True if model supports batching, False otherwise.
-
-    Raises:
-        Exception: if batching is on and result rize doesn't match batch size
-    """
-
-    output_array = results.as_numpy(output_name)
-    if supports_batching and len(output_array) != batch_size:
-        raise Exception(
-            "expected {} results, got {}".format(batch_size, len(output_array))
-        )
-
-    for results in output_array:
-        if not supports_batching:
-            results = [results]
-        for result in results:
-            if output_array.dtype.type == np.object_:
-                cls = "".join(chr(x) for x in result).split(":")
-            else:
-                cls = result.split(":")
-            print("    {} ({}) = {}".format(cls[0], cls[1], cls[2]))
-
-
 class ImageClient():
     def __init__(self, flags: Namespace,
                  dump_ext: str,):
@@ -125,7 +94,7 @@ class ImageClient():
             LOGGER.fatal("failed to retrieve the config: " + str(e))
             raise e
 
-        self.max_batch_size, self.input_name, self.output_name, self.c, self.h, self.w, self.format, self.dtype = self.parse_model(
+        self.max_batch_size, self.input_name, self.output_name, self.c, self.h, self.w, self.format, self.dtype = self._parse_model(
             self.model_metadata, self.model_config
         )
 
@@ -134,41 +103,39 @@ class ImageClient():
             LOGGER.fatal("ERROR: This model doesn't support batching.")
             raise e
 
-        self.batch = []
         self.batch_size = self.flags.batch_size
         self.sent_cnt = 0
         self.recv_cnt = 0
 
-    async def send(self, img: np.ndarray):
+    async def _send(self, img: list[np.ndarray]) -> None:
         """
-        Send async inference request to triton sever
+        Send inference request, get response and write to stdout
 
         Args:
-            img (np.ndarray): image to send
+            img (list[np.ndarray]): images to send
         """
 
-        self.batch.append(img)
-        if len(self.batch) == self.batch_size:
-            inf_batch = np.stack(
-                self.batch, axis=0) if self.supports_batching else img
-            try:
-                self.sent_cnt += 1
-                for inputs, outputs, model_name, model_version in self.requestGenerator(
-                    inf_batch, self.input_name, self.output_name, self.dtype
-                ):
-                    response = self.triton_client.infer(
-                        model_name, inputs, model_version, outputs, str(
-                            self.sent_cnt)
-                    )
-                    _process(response, self.output_name,
-                             self.batch_size, self.max_batch_size > 0)
-            except InferenceServerException as e:
-                LOGGER.error("Failed to send inference request: " + str(e))
+        assert len(img) == self.batch_size
 
-            finally:
-                self.batch.clear()
+        data = np.stack(img, axis=0) if self.supports_batching else img[0]
+        try:
+            inputs, outputs = self._make_req_data(data)
 
-    def run_loop(self, inp_queue: Queue, buf_stop: SyncEvent,):
+            response = self.triton_client.infer(
+                self.flags.model_name,
+                inputs,
+                self.flags.model_version,
+                outputs,
+                str(self.sent_cnt)
+            )
+
+            self._process(response)
+            self.sent_cnt += 1
+
+        except InferenceServerException as e:
+            LOGGER.error("Failed to send inference request: " + str(e))
+
+    def run_loop(self, inp_queue: Queue, buf_stop: SyncEvent,) -> None:
         """
         Inference loop.
         Will set up sync event after run time has passed.
@@ -189,7 +156,7 @@ class ImageClient():
             LOGGER.fatal(f"Failed to create decoder: {e}")
             return
 
-        # Asyncio loop and tasks for send coroutines
+        # Asyncio loop and send tasks
         loop = asyncio.get_event_loop()
         tasks = []
 
@@ -234,7 +201,7 @@ class ImageClient():
                     continue
 
                 # Async send for inference
-                tasks.append(loop.create_task(self.send(img)))
+                tasks.append(loop.create_task(self._send(img.copy())))
 
             except Exception as e:
                 LOGGER.error(
@@ -244,7 +211,7 @@ class ImageClient():
         loop.run_until_complete(asyncio.wait(tasks))
         loop.close()
 
-    def parse_model(self, model_metadata, model_config):
+    def _parse_model(self, model_metadata, model_config):
         """
         Check the configuration of a model to make sure it meets the
         requirements for an image classification network (as expected by
@@ -340,15 +307,47 @@ class ImageClient():
             input_metadata.datatype,
         )
 
-    def requestGenerator(self, batched_image_data, input_name, output_name, dtype):
-        client = grpcclient
+    def _make_req_data(self, batched_image_data):
+        """
+        Prepare inference request data
 
-        # Set the input data
-        inputs = [client.InferInput(
-            input_name, batched_image_data.shape, dtype)]
+        Args:
+            batched_image_data : numpy ndarray or list of that
+
+        Returns:
+            tuple with inference inputs and outputs
+        """
+
+        inputs = [grpcclient.InferInput(
+            self.input_name, batched_image_data.shape, self.dtype)]
+
         inputs[0].set_data_from_numpy(batched_image_data)
 
-        outputs = [client.InferRequestedOutput(
-            output_name, class_count=self.flags.classes)]
+        outputs = [grpcclient.InferRequestedOutput(
+            self.output_name, class_count=self.flags.classes)]
 
-        yield inputs, outputs, self.flags.model_name, self.flags.model_version
+        return (inputs, outputs)
+
+    def _process(self, results):
+        """
+        Process inference result and put it into stdout.
+
+        Args:
+            results (_type_): Inference result returned by Triton sever
+
+        Raises:
+            Exception: if batching is on and result rize doesn't match batch size
+        """
+
+        output_array = results.as_numpy(self.output_name)
+        assert len(output_array) == self.batch_size
+
+        for results in output_array:
+            if not self.supports_batching:
+                results = [results]
+            for result in results:
+                if output_array.dtype.type == np.object_:
+                    cls = "".join(chr(x) for x in result).split(":")
+                else:
+                    cls = result.split(":")
+                print("    {} ({}) = {}".format(cls[0], cls[1], cls[2]))

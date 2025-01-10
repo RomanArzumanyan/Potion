@@ -38,19 +38,29 @@ import python_potion.decoder as decoder
 import python_potion.converter as converter
 import python_vali as vali
 import time
+import asyncio
 
 from tritonclient.utils import InferenceServerException
+from argparse import Namespace
 
 
 LOGGER = logging.getLogger(__file__)
 
 
-class UserData:
-    def __init__(self):
-        self._completed_requests = Queue()
+def _process(results, output_name: str, batch_size: int, supports_batching: bool):
+    """
+    Process inference result and put it into stdout.
 
+    Args:
+        results (_type_): Inference result returned by Triton sever
+        output_name (str): output name
+        batch_size (int): model batch size
+        supports_batching (bool): True if model supports batching, False otherwise.
 
-def postprocess(results, output_name, batch_size, supports_batching):
+    Raises:
+        Exception: if batching is on and result rize doesn't match batch size
+    """
+
     output_array = results.as_numpy(output_name)
     if supports_batching and len(output_array) != batch_size:
         raise Exception(
@@ -69,8 +79,18 @@ def postprocess(results, output_name, batch_size, supports_batching):
 
 
 class ImageClient():
-    def __init__(self, flags,
+    def __init__(self, flags: Namespace,
                  dump_ext: str,):
+        """
+        Constructor.
+
+        Args:
+            flags (Namespace): parsed CLI args
+            dump_ext (str): dump filename extension
+
+        Raises:
+            InferenceServerException: if triton throws an exception
+        """
 
         self.dump_fname = flags.dump
         self.dump_ext = dump_ext
@@ -119,7 +139,14 @@ class ImageClient():
         self.sent_cnt = 0
         self.recv_cnt = 0
 
-    def send(self, img: np.ndarray):
+    async def send(self, img: np.ndarray):
+        """
+        Send async inference request to triton sever
+
+        Args:
+            img (np.ndarray): image to send
+        """
+
         self.batch.append(img)
         if len(self.batch) == self.batch_size:
             inf_batch = np.stack(
@@ -133,16 +160,24 @@ class ImageClient():
                         model_name, inputs, model_version, outputs, str(
                             self.sent_cnt)
                     )
-                    postprocess(response, self.output_name,
-                                self.batch_size, self.max_batch_size > 0)
+                    _process(response, self.output_name,
+                             self.batch_size, self.max_batch_size > 0)
             except InferenceServerException as e:
                 LOGGER.error("Failed to send inference request: " + str(e))
 
             finally:
                 self.batch.clear()
 
-    def inference_client(self, inp_queue: Queue, runtime: float,
-                         buf_stop: SyncEvent,):
+    def run_loop(self, inp_queue: Queue, buf_stop: SyncEvent,):
+        """
+        Inference loop.
+        Will set up sync event after run time has passed.
+
+        Args:
+            inp_queue (Queue): queue with video track chunks
+            buf_stop (SyncEvent): sync event to set up
+        """
+
         try:
             dec = decoder.NvDecoder(
                 inp_queue,
@@ -154,10 +189,16 @@ class ImageClient():
             LOGGER.fatal(f"Failed to create decoder: {e}")
             return
 
+        # Asyncio loop and tasks for send coroutines
+        loop = asyncio.get_event_loop()
+        tasks = []
+
         # Lazy init will be done
         conv = None
         surf_dst = vali.Surface.Make(vali.PixelFormat.RGB_32F_PLANAR,
                                      self.w, self.h, gpu_id=0)
+
+        runtime = float(self.flags.time)
         start = time.time()
         while True:
             # Signal stop
@@ -168,7 +209,7 @@ class ImageClient():
                 # Decode Surface
                 surf_src = dec.decode()
                 if surf_src is None:
-                    return
+                    break
 
                 # Process to match NN expectations
                 if not conv:
@@ -192,13 +233,16 @@ class ImageClient():
                     LOGGER.error(f"Failed to download surface: {info}")
                     continue
 
-                # Send for inference
-                self.send(img)
+                # Async send for inference
+                tasks.append(loop.create_task(self.send(img)))
 
             except Exception as e:
                 LOGGER.error(
                     f"Frame {self.sent_cnt}. Unexpected excepton: {str(e)}")
-                return
+                break
+
+        loop.run_until_complete(asyncio.wait(tasks))
+        loop.close()
 
     def parse_model(self, model_metadata, model_config):
         """
@@ -297,12 +341,7 @@ class ImageClient():
         )
 
     def requestGenerator(self, batched_image_data, input_name, output_name, dtype):
-        protocol = self.flags.protocol.lower()
-
-        if protocol == "grpc":
-            client = grpcclient
-        else:
-            client = httpclient
+        client = grpcclient
 
         # Set the input data
         inputs = [client.InferInput(

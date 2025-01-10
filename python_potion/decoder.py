@@ -36,9 +36,9 @@ class QueueAdapter:
         self.dump_fname = dump_fname
         if len(self.dump_fname):
             self.f_out = open(dump_fname, "ab")
-            atexit.register(self.cleanup)
+            atexit.register(self._cleanup)
 
-    def cleanup(self):
+    def _cleanup(self):
         self.f_out.close()
 
     def read(self, size: int) -> bytes:
@@ -109,7 +109,6 @@ class NvDecoder:
         except Exception as e:
             # No exception handling here.
             # Failure to create SW decoder is fatal.
-            LOGGER.warning(f"Failed to create HW decoder, reason: {str(e)}")
             self.py_dec = vali.PyDecoder(self.adapter, {}, gpu_id=-1)
 
         self.surf = vali.Surface.Make(

@@ -27,7 +27,8 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     parser = argparse.ArgumentParser(
-        "This sample decodes input video from network and saves is as H.264 video track."
+        "This utility decodes input video, runs inference on it and prints out resuts. \n"
+        "It can also dumps video track. \n"
     )
 
     parser.add_argument(
@@ -73,7 +74,7 @@ if __name__ == "__main__":
         action="store_true",
         required=False,
         default=False,
-        help="Enable verbose output",
+        help="Enable verbose output, turned off by default",
     )
     parser.add_argument(
         "-m", "--model-name", type=str, required=True, help="Name of model"
@@ -95,38 +96,12 @@ if __name__ == "__main__":
         help="Batch size. Default is 1.",
     )
     parser.add_argument(
-        "-c",
-        "--classes",
-        type=int,
-        required=False,
-        default=1,
-        help="Number of class results to report. Default is 1.",
-    )
-    parser.add_argument(
-        "-s",
-        "--scaling",
-        type=str,
-        choices=["NONE", "INCEPTION", "VGG"],
-        required=False,
-        default="NONE",
-        help="Type of scaling to apply to image pixels. For now it is NONE.",
-    )
-    parser.add_argument(
         "-u",
         "--url",
         type=str,
         required=False,
         default="localhost:8000",
         help="Inference server URL. Default is localhost:8000.",
-    )
-    parser.add_argument(
-        "-p",
-        "--protocol",
-        type=str,
-        required=False,
-        default="gRPC",
-        help="Protocol used to communicate with "
-        + "the inference service. For now it is gRPC only.",
     )
 
     FLAGS = parser.parse_args()
@@ -138,8 +113,7 @@ if __name__ == "__main__":
     # 1.1
     # Queue with video track chunks has variable size.
     # It serves as temporary storage to prevent data loss if consumer is slow.
-    buf_class = buffering.StreamBuffer(
-        FLAGS.input, {'num_retries': FLAGS.num_retries})
+    buf_class = buffering.StreamBuffer(FLAGS)
     buf_queue = Queue(maxsize=0)
 
     # 1.2
@@ -158,7 +132,7 @@ if __name__ == "__main__":
                                       buf_class.format_by_codec())
 
     # 2.2 Inference client will signal buf_proc to stop after timeout
-    client.inference_client(buf_queue, float(FLAGS.time), buf_proc_stop)
+    client.run_loop(buf_queue, buf_proc_stop)
 
     # 3.1
     # Stop buf_stream process.

@@ -21,6 +21,7 @@ from multiprocessing import Queue
 import logging
 from enum import Enum
 from multiprocessing.synchronize import Event as SyncEvent
+from argparse import Namespace
 
 LOGGER = logging.getLogger(__file__)
 
@@ -32,22 +33,20 @@ class FFMpegProcState(Enum):
 
 
 class StreamBuffer:
-    def __init__(self, url: str, settings: Dict):
-        self.num_retries = settings['num_retries']
+    def __init__(self, flags: Namespace):
+        """
+        Constructor
+
+        Args:
+            flags (Namespace): parsed CLI args
+        """
+
         self.err_cnt = 0
-        self.params = self.get_params_impl(url)
-        self.url = url
+        self.num_retries = flags.num_retries
+        self.url = flags.input
+        self.params = self._get_params(self.url)
 
-    def get_params(self) -> Dict:
-        """
-        Video params getter.
-
-        Returns:
-            Dict: dictionary with video stream params.
-        """
-        return self.params
-
-    def get_params_impl(self, url: str) -> Dict:
+    def _get_params(self, url: str) -> Dict:
         """
         Get video stream parameters via ffprobe.
         If there are multiple video stream, 1st stream params will be returned.
@@ -114,7 +113,7 @@ class StreamBuffer:
 
         raise ValueError("No video streams found")
 
-    def check_update_state(self) -> tuple[bool, FFMpegProcState]:
+    def _check_up_state(self) -> tuple[bool, FFMpegProcState]:
         """
         Checks FFMpeg process state and return tuple which describes it.
 
@@ -150,7 +149,7 @@ class StreamBuffer:
         else:
             raise RuntimeError(f"Unsupported codec: {codec}")
 
-    def run_ffmpeg(self) -> None:
+    def _run_ffmpeg(self) -> None:
         """
         Run FFMpeg in subprocess and redirect output to pipe.
         """
@@ -176,7 +175,7 @@ class StreamBuffer:
 
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
 
-    def ffmpeg_needs_respawn(self) -> bool:
+    def _ffmpeg_needs_respawn(self) -> bool:
         """
         Check if FFMpeg process needs to be respawned.
 
@@ -184,7 +183,7 @@ class StreamBuffer:
             bool: True if FFMpeg needs to be respawned, False otherwise.
         """
 
-        proc_status = self.check_update_state()
+        proc_status = self._check_up_state()
         alive = proc_status[0]
         if alive:
             return False
@@ -210,7 +209,7 @@ class StreamBuffer:
             stop_event (SyncEvent): set up this event to stop the method.
         """
         # Run FFMpeg in subprocess
-        self.run_ffmpeg()
+        self._run_ffmpeg()
 
         # Read from pipe and put into queue
         read_size = 4096
@@ -220,8 +219,8 @@ class StreamBuffer:
                 if not len(bytes):
                     # In we are here pipe is closed. It means writing end of
                     # the pipe has exited. Check we need to respawn ffmpeg.
-                    if self.ffmpeg_needs_respawn():
-                        self.run_ffmpeg()
+                    if self._ffmpeg_needs_respawn():
+                        self._run_ffmpeg()
                         continue
                     else:
                         break

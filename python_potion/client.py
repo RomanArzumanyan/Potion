@@ -201,7 +201,7 @@ class ImageClient():
                     continue
 
                 # Async send for inference
-                tasks.append(loop.create_task(self._send(img.copy())))
+                tasks.append(loop.create_task(self._send([img.copy()])))
 
             except Exception as e:
                 LOGGER.error(

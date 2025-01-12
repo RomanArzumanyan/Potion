@@ -1,0 +1,10 @@
+{
+    "basic": {
+        "uri": "data/test.mp4",
+        "width": 848,
+        "height": 464,
+        "framerate": 30.0,
+        "codec": "h264",
+        "format": "PixelFormat.NV12"
+    }
+}

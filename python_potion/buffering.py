@@ -44,9 +44,9 @@ class StreamBuffer:
         self.err_cnt = 0
         self.num_retries = flags.num_retries
         self.url = flags.input
-        self.params = self._get_params(self.url)
+        self.params = self._get_params()
 
-    def _get_params(self, url: str) -> Dict:
+    def _get_params(self) -> Dict:
         """
         Get video stream parameters via ffprobe.
         If there are multiple video stream, 1st stream params will be returned.
@@ -69,7 +69,7 @@ class StreamBuffer:
             "json",
             "-show_format",
             "-show_streams",
-            url,
+            self.url,
         ]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
         stdout = proc.communicate()[0]

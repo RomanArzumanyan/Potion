@@ -24,6 +24,7 @@ from multiprocessing.synchronize import Event as SyncEvent
 from argparse import Namespace
 
 LOGGER = logging.getLogger(__file__)
+CHUNK_SIZE = 4096
 
 
 class FFMpegProcState(Enum):
@@ -45,6 +46,15 @@ class StreamBuffer:
         self.num_retries = flags.num_retries
         self.url = flags.input
         self.params = self._get_params()
+
+    def chunk_size(self) -> int:
+        """
+        Get chunk size
+
+        Returns:
+            int: size of chunk that is put to output queue.
+        """
+        return CHUNK_SIZE
 
     def _get_params(self) -> Dict:
         """
@@ -159,7 +169,7 @@ class StreamBuffer:
             "ffmpeg",
             "-hide_banner",
             "-loglevel",
-            "fatal",
+            "quiet",
             "-i",
             self.url,
             "-map",
@@ -194,31 +204,29 @@ class StreamBuffer:
             else:
                 if self.err_cnt < self.num_retries:
                     LOGGER.warning(
-                        f"FFMpeg process respawn: {self.err_cnt} of {self.num_retries}")
+                        f"FFMpeg process respawn {self.err_cnt} of {self.num_retries}")
                     return True
                 else:
                     return False
 
-    def buf_stream(self, buf_queue: Queue, stop_event: SyncEvent) -> None:
+    def buf_stream(self, buf_queue: Queue, stop_event: SyncEvent = None) -> None:
         """
-        Takes video track from FFMpeg subprocess, puts in to queue.
+        Takes video track from FFMpeg subprocess, puts in to queue. \\
         It is to be run in a separate process.
+        Puts `None` into :arg:`buf_queue` to signal "no more data" to consumer.
 
         Args:
             buf_queue (Queue): queue with video chunks
-            stop_event (SyncEvent): set up this event to stop the method.
+            stop_event (SyncEvent): set up to stop, otherwise will run till EOF
         """
-        # Run FFMpeg in subprocess
+        # Run ffmpeg in subprocess
         self._run_ffmpeg()
 
         # Read from pipe and put into queue
-        read_size = 4096
-        while not stop_event.is_set():
+        while not stop_event.is_set() if stop_event else True:
             try:
-                bytes = self.proc.stdout.read(read_size)
+                bytes = self.proc.stdout.read(CHUNK_SIZE)
                 if not len(bytes):
-                    # In we are here pipe is closed. It means writing end of
-                    # the pipe has exited. Check we need to respawn ffmpeg.
                     if self._ffmpeg_needs_respawn():
                         self._run_ffmpeg()
                         continue
@@ -233,8 +241,9 @@ class StreamBuffer:
                 continue
 
         buf_queue.put(None)
-
         buf_queue.close()
-        buf_queue.join_thread()
+
+        # Otherwise process won't join until queue becomes empty
+        buf_queue.cancel_join_thread()
 
         self.proc.terminate()

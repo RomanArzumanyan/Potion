@@ -16,6 +16,7 @@ from multiprocessing import Queue
 import numpy as np
 import logging
 from multiprocessing.synchronize import Event as SyncEvent
+from argparse import Namespace
 
 LOGGER = logging.getLogger(__file__)
 
@@ -67,17 +68,17 @@ class QueueAdapter:
         return bytearray()
 
 
-class NvDecoder:
+class Decoder:
     def __init__(self,
                  inp_queue: Queue,
-                 gpu_id=0,):
+                 flags: Namespace,):
         """
         Constructor
 
         Args:
             inp_queue (Queue): queue with video chunks. If it's closed,
                 this function may never return.
-            gpu_id (int, optional): GPU to run on. Defaults to 0.
+            flags (Namespace): parsed CLI args
         """
 
         self.adapter = QueueAdapter(inp_queue)
@@ -85,21 +86,48 @@ class NvDecoder:
         # First try to create HW-accelerated decoder.
         # Some codecs / formats may not be supported, fall back to SW decoder then.
         try:
-            self.py_dec = vali.PyDecoder(self.adapter, {}, gpu_id)
+            self.py_dec = vali.PyDecoder(self.adapter, {}, flags.gpu_id)
         except Exception as e:
             # No exception handling here.
             # Failure to create SW decoder is fatal.
             self.py_dec = vali.PyDecoder(self.adapter, {}, gpu_id=-1)
 
         self.surf = vali.Surface.Make(
-            self.py_dec.Format, self.py_dec.Width, self.py_dec.Height, gpu_id)
+            self.py_dec.Format, self.py_dec.Width, self.py_dec.Height, flags.gpu_id)
 
         # SW decoder outputs to numpy array.
         # Have to initialize uploader to keep decoded frames always in vRAM.
         if not self.py_dec.IsAccelerated:
-            self.uploader = vali.PyFrameUploader(gpu_id)
+            self.uploader = vali.PyFrameUploader(flags.gpu_id)
             self.dec_frame = np.ndarray(shape=(self.py_dec.HostFrameSize),
                                         dtype=np.uint8)
+
+    def width(self) -> int:
+        """
+        Get video width.
+
+        Returns:
+            int: width in pixels
+        """
+        return self.py_dec.Width
+
+    def height(self) -> int:
+        """
+        Get video height.
+
+        Returns:
+            int: height in pixels
+        """
+        return self.py_dec.Height
+
+    def format(self) -> vali.PixelFormat:
+        """
+        Get video pixel format.
+        
+        Returns:
+            vali.PixelFormat: pixel format
+        """
+        return self.py_dec.Format
 
     def decode(self) -> vali.Surface:
         """

@@ -33,7 +33,6 @@ from multiprocessing.synchronize import Event as SyncEvent
 import numpy as np
 import tritonclient.grpc as grpcclient
 import tritonclient.grpc.model_config_pb2 as mc
-import tritonclient.http as httpclient
 import python_potion.decoder as decoder
 import python_potion.converter as converter
 import python_vali as vali
@@ -142,7 +141,18 @@ class ImageClient():
         """
 
         try:
-            dec = decoder.NvDecoder(inp_queue, self.gpu_id)
+            dec = decoder.Decoder(inp_queue, self.flags)
+
+            params = {
+                "src_fmt": dec.format(),
+                "dst_fmt": vali.PixelFormat.RGB_32F_PLANAR,
+                "src_w": dec.width(),
+                "src_h": dec.height(),
+                "dst_w": self.w,
+                "dst_h": self.h
+            }
+
+            conv = converter.Converter(params, self.flags)
 
         except Exception as e:
             LOGGER.fatal(f"Failed to create decoder: {e}")
@@ -151,11 +161,6 @@ class ImageClient():
         # Asyncio loop and send tasks
         loop = asyncio.get_event_loop()
         tasks = []
-
-        # Lazy init will be done
-        conv = None
-        surf_dst = vali.Surface.Make(vali.PixelFormat.RGB_32F_PLANAR,
-                                     self.w, self.h, gpu_id=0)
 
         runtime = float(self.flags.time)
         start = time.time()
@@ -171,18 +176,7 @@ class ImageClient():
                     break
 
                 # Process to match NN expectations
-                if not conv:
-                    params = {
-                        "src_fmt": surf_src.Format,
-                        "dst_fmt": surf_dst.Format,
-                        "src_w": surf_src.Width,
-                        "src_h": surf_src.Height,
-                        "dst_w": surf_dst.Width,
-                        "dst_h": surf_dst.Height
-                    }
-                    conv = converter.Converter(params, self.gpu_id)
-
-                conv.run(surf_src, surf_dst)
+                surf_dst = conv.run(surf_src)
 
                 # Download to numpy array
                 img = np.ndarray(

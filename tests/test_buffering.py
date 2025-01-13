@@ -35,7 +35,7 @@ def drain(q: Queue) -> int:
         q (Queue): input queue.
 
     Returns:
-        int: amount of drained data.
+        int: drained data size.
     """
     size = 0
     while True:
@@ -44,10 +44,8 @@ def drain(q: Queue) -> int:
             if chunk is None:
                 return size
             size += len(chunk)
-            # print(f"{len(chunk)} / {size}")
 
         except Empty:
-            # print("Empty")
             continue
 
         except ValueError:
@@ -122,14 +120,13 @@ class TestOnLocalStream(unittest.TestCase):
         chunk_size = drain(buf_queue)
         buf_proc.join()
 
-        # Size mismatch within 5% tolerance is considered OK.
         file_size = float(self.gt["filesize"])
         self.assertLessEqual(
             abs(file_size - chunk_size) / file_size, THRESHOLD)
 
     @parameterized.expand([
         ["video_track"],
-        # [""]
+        [""]
     ])
     def test_dump(self, dump_fname: str):
         """
@@ -170,8 +167,8 @@ class TestOnLocalStream(unittest.TestCase):
             args=(buf_queue, buf_proc_stop),
         )
 
-        # Can't guarantee what amount of input will be processed when process is stopped.
-        # So if the test finishes it's considered to be success.
+        # Can't guarantee what amount of input will be processed when process
+        # is stopped. So if the test finishes it's considered success.
         buf_proc.start()
         buf_proc_stop.set()
         drain(buf_queue)

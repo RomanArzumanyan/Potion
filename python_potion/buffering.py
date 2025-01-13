@@ -36,6 +36,13 @@ class FFMpegProcState(Enum):
 
 
 class StreamBuffer:
+    """
+    Use this class to buffer video stream.
+    It takes video track from input and stores it in variable size queue of bytes.
+    No decoding is done, only video track demuxing. Optionally it may be dumped to HDD.
+    Class may serve as buffer if your video processing code can't handle real time FPS.
+    """
+
     def __init__(self, flags: Namespace):
         """
         Constructor
@@ -202,9 +209,9 @@ class StreamBuffer:
         """
 
         codec = self.params["codec"]
-        if codec == "h264" or codec == "hevc" or codec == "av1":
+        if codec == "h264" or codec == "hevc":
             return "mpegts"
-        elif codec == "vp8" or codec == "vp9":
+        elif codec == "vp8" or codec == "vp9" or codec == "av1":
             return "webm"
         else:
             raise RuntimeError(f"Unsupported codec: {codec}")

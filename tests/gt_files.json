@@ -6,6 +6,7 @@
         "framerate": 30.0,
         "codec": "h264",
         "format": "PixelFormat.NV12",
+        "num_frames": 96,
         "filesize": 229745,
         "buf_fmt_name": {
             "value": "mpegts",

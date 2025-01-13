@@ -27,7 +27,7 @@ MB = 1024 * 1024
 THRESHOLD = 0.05
 
 
-class TestLocal(unittest.TestCase):
+class TestOnLocalStream(unittest.TestCase):
     def __init__(self, methodName):
         super().__init__(methodName)
 
@@ -38,7 +38,11 @@ class TestLocal(unittest.TestCase):
 
     def test__get_params(self):
         """
-        This test checks URL probe
+        This test checks URL probe.
+
+        _get_params is a 'private' method, but the video track params
+        are single most important set of parameters, so we'd like to 
+        test it.
         """
 
         buf = buffering.StreamBuffer(self.flags)
@@ -50,6 +54,9 @@ class TestLocal(unittest.TestCase):
     def test__format_name(self):
         """
         This test checks if format name is generated as expected.
+
+        _format_name is a 'private' method, but it influences dump file
+        extension which is visible to user, hence we want to test it.
         """
         buf = buffering.StreamBuffer(self.flags)
         self.assertEqual(buf._format_name(),
@@ -57,7 +64,7 @@ class TestLocal(unittest.TestCase):
 
     def test_buf_stream_till_eof(self):
         """
-        This test checks that bufferization processes the whole input
+        Check if bufferization processes the whole input.
         """
 
         buf = buffering.StreamBuffer(self.flags)
@@ -83,7 +90,7 @@ class TestLocal(unittest.TestCase):
     ])
     def test_dump(self, dump_fname: str):
         """
-        This test checks video track dump feature
+        Test video track dump feature.
         """
         flags = self.flags
         flags.dump = dump_fname
@@ -108,7 +115,7 @@ class TestLocal(unittest.TestCase):
 
     def test_buf_stream_till_stop(self):
         """
-        This test checks the bufferization process stops at event.
+        Check if bufferization process stops at event.
         """
 
         buf = buffering.StreamBuffer(self.flags)

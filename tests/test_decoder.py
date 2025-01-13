@@ -52,10 +52,7 @@ class TestOnLocalStream(unittest.TestCase):
 
         dec = decoder.NvDecoder(buf_queue, self.flags.gpu_id)
         dec_cnt = 0
-        while True:
-            surf = dec.decode()
-            if not surf:
-                break
+        while dec.decode() is not None:
             dec_cnt += 1
 
         self.assertEqual(dec_cnt, self.gt["num_frames"])

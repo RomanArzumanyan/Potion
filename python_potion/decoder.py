@@ -75,7 +75,8 @@ class NvDecoder:
         Constructor
 
         Args:
-            inp_queue (Queue): queue with video chunks
+            inp_queue (Queue): queue with video chunks. If it's closed,
+                this function may never return.
             gpu_id (int, optional): GPU to run on. Defaults to 0.
         """
 

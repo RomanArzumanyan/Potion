@@ -49,7 +49,6 @@ class TestOnLocalStream(unittest.TestCase):
         )
 
         buf_proc.start()
-        buf_proc.join()
 
         dec = decoder.NvDecoder(buf_queue, self.flags.gpu_id)
         dec_cnt = 0
@@ -60,3 +59,4 @@ class TestOnLocalStream(unittest.TestCase):
             dec_cnt += 1
 
         self.assertEqual(dec_cnt, self.gt["num_frames"])
+        buf_proc.join()

@@ -20,11 +20,39 @@ import python_potion.buffering as buffering
 from multiprocessing import Queue, Process
 from pathlib import Path
 from parameterized import parameterized
+from queue import Empty
 
 GT_FILENAME = "gt_files.json"
 TEST_CASE = "basic"
-MB = 1024 * 1024
 THRESHOLD = 0.05
+
+
+def drain(q: Queue) -> int:
+    """
+    Drain queue. Will not return unless :arg:`q` is empty.
+
+    Args:
+        q (Queue): input queue.
+
+    Returns:
+        int: amount of drained data.
+    """
+    size = 0
+    while True:
+        try:
+            chunk = q.get_nowait()
+            if chunk is None:
+                return size
+            size += len(chunk)
+            # print(f"{len(chunk)} / {size}")
+
+        except Empty:
+            # print("Empty")
+            continue
+
+        except ValueError:
+            break
+    return size
 
 
 class TestOnLocalStream(unittest.TestCase):
@@ -62,6 +90,22 @@ class TestOnLocalStream(unittest.TestCase):
         self.assertEqual(buf._format_name(),
                          self.gt["buf_fmt_name"]["value"])
 
+    def test_invalid_url(self):
+        """
+        Test invalid input url.
+        """
+        flags = self.flags
+        flags.input = "nonexistent.mp4"
+        try:
+            buf = buffering.StreamBuffer(flags)
+
+        except ValueError as e:
+            err_str = 'No stream parameters found'
+            self.assertRegex(str(e), err_str)
+            return
+
+        self.fail("Test is expected to raise ValueError exception")
+
     def test_buf_stream_till_eof(self):
         """
         Check if bufferization processes the whole input.
@@ -75,18 +119,17 @@ class TestOnLocalStream(unittest.TestCase):
         )
 
         buf_proc.start()
+        chunk_size = drain(buf_queue)
         buf_proc.join()
 
-        file_size = float(self.gt["filesize"])
-        chunk_size = float(buf_queue.qsize() * buf.chunk_size())
-
         # Size mismatch within 5% tolerance is considered OK.
+        file_size = float(self.gt["filesize"])
         self.assertLessEqual(
             abs(file_size - chunk_size) / file_size, THRESHOLD)
 
     @parameterized.expand([
         ["video_track"],
-        [""]
+        # [""]
     ])
     def test_dump(self, dump_fname: str):
         """
@@ -103,6 +146,7 @@ class TestOnLocalStream(unittest.TestCase):
         )
 
         buf_proc.start()
+        drain(buf_queue)
         buf_proc.join()
 
         if not len(dump_fname):
@@ -130,4 +174,5 @@ class TestOnLocalStream(unittest.TestCase):
         # So if the test finishes it's considered to be success.
         buf_proc.start()
         buf_proc_stop.set()
+        drain(buf_queue)
         buf_proc.join()

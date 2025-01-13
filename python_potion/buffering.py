@@ -96,7 +96,7 @@ class StreamBuffer:
         async def _write_chunk(f_out, chunk) -> None:
             f_out.write(chunk)
 
-        if self.f_out and self.tasks and self.loop and chunk:
+        if self.f_out:
             task = self.loop.create_task(
                 _write_chunk(self.f_out, copy.deepcopy(chunk)))
             self.tasks.add(task)
@@ -307,7 +307,4 @@ class StreamBuffer:
 
         # Wait for dump to complete and close file handle
         self._await_dump()
-
-        # Otherwise process won't join until queue becomes empty
-        buf_queue.cancel_join_thread()
         self.proc.terminate()

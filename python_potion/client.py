@@ -48,21 +48,17 @@ LOGGER = logging.getLogger(__file__)
 
 
 class ImageClient():
-    def __init__(self, flags: Namespace,
-                 dump_ext: str,):
+    def __init__(self, flags: Namespace,):
         """
         Constructor.
 
         Args:
             flags (Namespace): parsed CLI args
-            dump_ext (str): dump filename extension
 
         Raises:
             InferenceServerException: if triton throws an exception
         """
 
-        self.dump_fname = flags.dump
-        self.dump_ext = dump_ext
         self.gpu_id = flags.gpu_id
 
         self.flags = flags
@@ -146,11 +142,7 @@ class ImageClient():
         """
 
         try:
-            dec = decoder.NvDecoder(
-                inp_queue,
-                self.dump_fname,
-                self.dump_ext,
-                self.gpu_id)
+            dec = decoder.NvDecoder(inp_queue, self.gpu_id)
 
         except Exception as e:
             LOGGER.fatal(f"Failed to create decoder: {e}")

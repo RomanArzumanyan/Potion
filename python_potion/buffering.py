@@ -19,11 +19,14 @@ from io import BytesIO
 import python_vali as vali
 from multiprocessing import Queue
 import logging
+import asyncio
+import copy
 from enum import Enum
 from multiprocessing.synchronize import Event as SyncEvent
 from argparse import Namespace
 
 LOGGER = logging.getLogger(__file__)
+CHUNK_SIZE = 4096
 
 
 class FFMpegProcState(Enum):
@@ -33,6 +36,13 @@ class FFMpegProcState(Enum):
 
 
 class StreamBuffer:
+    """
+    Use this class to buffer video stream.
+    It takes video track from input and stores it in variable size queue of bytes.
+    No decoding is done, only video track demuxing. Optionally it may be dumped to HDD.
+    Class may serve as buffer if your video processing code can't handle real time FPS.
+    """
+
     def __init__(self, flags: Namespace):
         """
         Constructor
@@ -45,6 +55,63 @@ class StreamBuffer:
         self.num_retries = flags.num_retries
         self.url = flags.input
         self.params = self._get_params()
+
+        self.f_name = None
+        self.f_out = None
+        self.tasks = None
+        self.loop = None
+
+        if len(flags.dump):
+            self.f_name = flags.dump + "." + self._format_name()
+            self.loop = asyncio.get_event_loop()
+            self.tasks = set()
+            # Have to open and close file handle in same process.
+            # So self.fout will be opened and closed in self.buf_stream
+
+    def dump_fname(self) -> str:
+        """
+        Return dump filename with extension. If dump wasn't opted in, return None
+
+        Returns:
+            str: filename with extension
+        """
+        return self.f_name
+
+    def chunk_size(self) -> int:
+        """
+        Get chunk size
+
+        Returns:
+            int: size of chunk that is put to output queue.
+        """
+        return CHUNK_SIZE
+
+    def _dump(self, chunk: bytes) -> None:
+        """
+        Append chunk dump task to list.
+
+        Args:
+            chunk (bytes): video track bytes, will be deep copied
+        """
+        async def _write_chunk(f_out, chunk) -> None:
+            f_out.write(chunk)
+
+        if self.f_out:
+            task = self.loop.create_task(
+                _write_chunk(self.f_out, copy.deepcopy(chunk)))
+            self.tasks.add(task)
+            task.add_done_callback(self.tasks.remove)
+
+    def _await_dump(self) -> None:
+        """
+        Wait for all dump tasks to be completed, close the loop and file handle
+        """
+        if self.loop and self.tasks:
+            self.loop.run_until_complete(asyncio.wait(self.tasks))
+            self.loop.close()
+
+        if self.f_out:
+            self.f_out.close()
 
     def _get_params(self) -> Dict:
         """
@@ -133,7 +200,7 @@ class StreamBuffer:
                 self.err_cnt += 1
                 return False, FFMpegProcState.ERROR
 
-    def format_by_codec(self) -> str:
+    def _format_name(self) -> str:
         """
         Get output format by codec
 
@@ -142,9 +209,9 @@ class StreamBuffer:
         """
 
         codec = self.params["codec"]
-        if codec == "h264" or codec == "hevc" or codec == "av1":
+        if codec == "h264" or codec == "hevc":
             return "mpegts"
-        elif codec == "vp8" or codec == "vp9":
+        elif codec == "vp8" or codec == "vp9" or codec == "av1":
             return "webm"
         else:
             raise RuntimeError(f"Unsupported codec: {codec}")
@@ -159,7 +226,7 @@ class StreamBuffer:
             "ffmpeg",
             "-hide_banner",
             "-loglevel",
-            "fatal",
+            "quiet",
             "-i",
             self.url,
             "-map",
@@ -169,7 +236,7 @@ class StreamBuffer:
             "-c:a",
             "none",
             "-f",
-            self.format_by_codec(),
+            self._format_name(),
             "pipe:1",
         ]
 
@@ -194,37 +261,40 @@ class StreamBuffer:
             else:
                 if self.err_cnt < self.num_retries:
                     LOGGER.warning(
-                        f"FFMpeg process respawn: {self.err_cnt} of {self.num_retries}")
+                        f"FFMpeg process respawn {self.err_cnt} of {self.num_retries}")
                     return True
                 else:
                     return False
 
-    def buf_stream(self, buf_queue: Queue, stop_event: SyncEvent) -> None:
+    def buf_stream(self, buf_queue: Queue, stop_event: SyncEvent = None) -> None:
         """
-        Takes video track from FFMpeg subprocess, puts in to queue.
+        Takes video track from FFMpeg subprocess, puts in to queue. \\
         It is to be run in a separate process.
+        Puts `None` into :arg:`buf_queue` to signal "no more data" to consumer.
 
         Args:
             buf_queue (Queue): queue with video chunks
-            stop_event (SyncEvent): set up this event to stop the method.
+            stop_event (SyncEvent): set up to stop, otherwise will run till EOF
         """
-        # Run FFMpeg in subprocess
+        # Need to open and close file handle in the same process, so do it here
+        if self.f_name:
+            self.f_out = open(self.f_name, "ab")
+
+        # Run ffmpeg in subprocess
         self._run_ffmpeg()
 
         # Read from pipe and put into queue
-        read_size = 4096
-        while not stop_event.is_set():
+        while not stop_event.is_set() if stop_event else True:
             try:
-                bytes = self.proc.stdout.read(read_size)
+                bytes = self.proc.stdout.read(CHUNK_SIZE)
                 if not len(bytes):
-                    # In we are here pipe is closed. It means writing end of
-                    # the pipe has exited. Check we need to respawn ffmpeg.
                     if self._ffmpeg_needs_respawn():
                         self._run_ffmpeg()
                         continue
                     else:
                         break
                 buf_queue.put(bytes)
+                self._dump(bytes)
 
             except ValueError:
                 break
@@ -233,8 +303,8 @@ class StreamBuffer:
                 continue
 
         buf_queue.put(None)
-
         buf_queue.close()
-        buf_queue.join_thread()
 
+        # Wait for dump to complete and close file handle
+        self._await_dump()
         self.proc.terminate()

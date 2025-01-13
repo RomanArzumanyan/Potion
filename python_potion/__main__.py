@@ -42,8 +42,7 @@ def main(flags: argparse.Namespace) -> None:
     # 2.1
     # Start inference in current process.
     # It will take input from queue, decode and send images to triton inference server.
-    client = image_client.ImageClient(flags,
-                                      buf_class.format_by_codec())
+    client = image_client.ImageClient(flags)
 
     # 2.2 Inference client will signal buf_proc to stop after timeout
     client.run_loop(buf_queue, buf_proc_stop)

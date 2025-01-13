@@ -19,6 +19,8 @@ from io import BytesIO
 import python_vali as vali
 from multiprocessing import Queue
 import logging
+import asyncio
+import copy
 from enum import Enum
 from multiprocessing.synchronize import Event as SyncEvent
 from argparse import Namespace
@@ -47,6 +49,27 @@ class StreamBuffer:
         self.url = flags.input
         self.params = self._get_params()
 
+        self.f_name = None
+        self.f_out = None
+        self.tasks = None
+        self.loop = None
+
+        if len(flags.dump):
+            self.f_name = flags.dump + "." + self._format_name()
+            self.loop = asyncio.get_event_loop()
+            self.tasks = set()
+            # Have to open and close file handle in same process.
+            # So self.fout will be opened and closed in self.buf_stream
+
+    def dump_fname(self) -> str:
+        """
+        Return dump filename with extension. If dump wasn't opted in, return None
+
+        Returns:
+            str: filename with extension
+        """
+        return self.f_name
+
     def chunk_size(self) -> int:
         """
         Get chunk size
@@ -55,6 +78,33 @@ class StreamBuffer:
             int: size of chunk that is put to output queue.
         """
         return CHUNK_SIZE
+
+    def _dump(self, chunk: bytes) -> None:
+        """
+        Append chunk dump task to list.
+
+        Args:
+            chunk (bytes): video track bytes, will be deep copied
+        """
+        async def _write_chunk(f_out, chunk) -> None:
+            f_out.write(chunk)
+
+        if self.f_out and self.tasks and self.loop and chunk:
+            task = self.loop.create_task(
+                _write_chunk(self.f_out, copy.deepcopy(chunk)))
+            self.tasks.add(task)
+            task.add_done_callback(self.tasks.remove)
+
+    def _await_dump(self) -> None:
+        """
+        Wait for all dump tasks to be completed, close the loop and file handle
+        """
+        if self.loop and self.tasks:
+            self.loop.run_until_complete(asyncio.wait(self.tasks))
+            self.loop.close()
+
+        if self.f_out:
+            self.f_out.close()
 
     def _get_params(self) -> Dict:
         """
@@ -143,7 +193,7 @@ class StreamBuffer:
                 self.err_cnt += 1
                 return False, FFMpegProcState.ERROR
 
-    def format_by_codec(self) -> str:
+    def _format_name(self) -> str:
         """
         Get output format by codec
 
@@ -179,7 +229,7 @@ class StreamBuffer:
             "-c:a",
             "none",
             "-f",
-            self.format_by_codec(),
+            self._format_name(),
             "pipe:1",
         ]
 
@@ -219,6 +269,10 @@ class StreamBuffer:
             buf_queue (Queue): queue with video chunks
             stop_event (SyncEvent): set up to stop, otherwise will run till EOF
         """
+        # Need to open and close file handle in the same process, so do it here
+        if self.f_name:
+            self.f_out = open(self.f_name, "ab")
+
         # Run ffmpeg in subprocess
         self._run_ffmpeg()
 
@@ -233,6 +287,7 @@ class StreamBuffer:
                     else:
                         break
                 buf_queue.put(bytes)
+                self._dump(bytes)
 
             except ValueError:
                 break
@@ -243,7 +298,9 @@ class StreamBuffer:
         buf_queue.put(None)
         buf_queue.close()
 
+        # Wait for dump to complete and close file handle
+        self._await_dump()
+
         # Otherwise process won't join until queue becomes empty
         buf_queue.cancel_join_thread()
-
         self.proc.terminate()

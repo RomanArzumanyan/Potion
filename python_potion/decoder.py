@@ -16,30 +16,21 @@ from multiprocessing import Queue
 import numpy as np
 import logging
 from multiprocessing.synchronize import Event as SyncEvent
-import atexit
 
 LOGGER = logging.getLogger(__file__)
 
 
 class QueueAdapter:
-    def __init__(self, inp_queue: Queue, dump_fname: str,):
+    def __init__(self, inp_queue: Queue,):
         """
         Constructor
 
         Args:
             inp_queue (Queue): queue with video chunks
-            dump_fname (str): dump file name, if empty no dump will be done
         """
 
         self.all_done = False
         self.inp_queue = inp_queue
-        self.dump_fname = dump_fname
-        if len(self.dump_fname):
-            self.f_out = open(dump_fname, "ab")
-            atexit.register(self._cleanup)
-
-    def _cleanup(self):
-        self.f_out.close()
 
     def read(self, size: int) -> bytes:
         """
@@ -62,9 +53,6 @@ class QueueAdapter:
                     self.all_done = True
                     return bytearray()
 
-                if len(self.dump_fname):
-                    self.f_out.write(chunk)
-
                 return chunk
 
             except Empty:
@@ -82,25 +70,16 @@ class QueueAdapter:
 class NvDecoder:
     def __init__(self,
                  inp_queue: Queue,
-                 dump_fname: str,
-                 dump_ext: str,
                  gpu_id=0,):
         """
         Constructor
 
         Args:
             inp_queue (Queue): queue with video chunks
-            dump_fname (str): dump file name, if empty no dump will be done
-            dump_ext (str): dump file dump_ext
             gpu_id (int, optional): GPU to run on. Defaults to 0.
         """
 
-        fname_plus_ext = dump_fname
-        if len(fname_plus_ext):
-            fname_plus_ext += "."
-            fname_plus_ext += dump_ext
-
-        self.adapter = QueueAdapter(inp_queue, fname_plus_ext)
+        self.adapter = QueueAdapter(inp_queue)
 
         # First try to create HW-accelerated decoder.
         # Some codecs / formats may not be supported, fall back to SW decoder then.

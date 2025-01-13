@@ -10,15 +10,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import json
-import time
 import unittest
 import test_common as tc
 import multiprocessing as mp
 import python_potion.buffering as buffering
 
 from multiprocessing import Queue, Process
-from queue import Empty
+from pathlib import Path
+from parameterized import parameterized
 
 GT_FILENAME = "gt_files.json"
 TEST_CASE = "basic"
@@ -46,12 +47,12 @@ class TestLocal(unittest.TestCase):
         for key in params.keys():
             self.assertEqual(str(params[key]), str(self.gt[key]))
 
-    def test_format_by_codec(self):
+    def test__format_name(self):
         """
         This test checks if format name is generated as expected.
         """
         buf = buffering.StreamBuffer(self.flags)
-        self.assertEqual(buf.format_by_codec(),
+        self.assertEqual(buf._format_name(),
                          self.gt["buf_fmt_name"]["value"])
 
     def test_buf_stream_till_eof(self):
@@ -69,16 +70,45 @@ class TestLocal(unittest.TestCase):
         buf_proc.start()
         buf_proc.join()
 
-        file_size = float(self.gt["filesize"]) / MB
-        chunk_size = float(buf_queue.qsize() * buf.chunk_size()) / MB
+        file_size = float(self.gt["filesize"])
+        chunk_size = float(buf_queue.qsize() * buf.chunk_size())
 
         # Size mismatch within 5% tolerance is considered OK.
         self.assertLessEqual(
             abs(file_size - chunk_size) / file_size, THRESHOLD)
 
+    @parameterized.expand([
+        ["video_track"],
+        [""]
+    ])
+    def test_dump(self, dump_fname: str):
+        """
+        This test checks video track dump feature
+        """
+        flags = self.flags
+        flags.dump = dump_fname
+
+        buf = buffering.StreamBuffer(flags)
+        buf_queue = Queue(maxsize=0)
+        buf_proc = Process(
+            target=buf.buf_stream,
+            args=(buf_queue, None),
+        )
+
+        buf_proc.start()
+        buf_proc.join()
+
+        if not len(dump_fname):
+            self.assertIsNone(buf.dump_fname())
+        else:
+            fname = Path(buf.dump_fname())
+            self.assertEqual(True, fname.is_file())
+            self.assertGreater(os.path.getsize(fname), 0)
+            os.remove(fname)
+
     def test_buf_stream_till_stop(self):
         """
-        This test checks the bufferization process stops at event
+        This test checks the bufferization process stops at event.
         """
 
         buf = buffering.StreamBuffer(self.flags)

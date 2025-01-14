@@ -19,11 +19,14 @@ from io import BytesIO
 import python_vali as vali
 from multiprocessing import Queue
 import logging
-import asyncio
 import copy
 from enum import Enum
 from multiprocessing.synchronize import Event as SyncEvent
 from argparse import Namespace
+import concurrent.futures as fut
+import time
+
+import nvtx
 
 LOGGER = logging.getLogger(__file__)
 CHUNK_SIZE = 4096
@@ -58,13 +61,12 @@ class StreamBuffer:
 
         self.f_name = None
         self.f_out = None
-        self.tasks = None
+        self.tasks = set()
         self.loop = None
 
         if len(flags.dump):
+            self.executor = fut.ThreadPoolExecutor(max_workers=1)
             self.f_name = flags.dump + "." + self._format_name()
-            self.loop = asyncio.get_event_loop()
-            self.tasks = set()
             # Have to open and close file handle in same process.
             # So self.fout will be opened and closed in self.buf_stream
 
@@ -86,6 +88,7 @@ class StreamBuffer:
         """
         return CHUNK_SIZE
 
+    @nvtx.annotate()
     def _dump(self, chunk: bytes) -> None:
         """
         Append chunk dump task to list.
@@ -93,22 +96,18 @@ class StreamBuffer:
         Args:
             chunk (bytes): video track bytes, will be deep copied
         """
-        async def _write_chunk(f_out, chunk) -> None:
-            f_out.write(chunk)
-
         if self.f_out:
-            task = self.loop.create_task(
-                _write_chunk(self.f_out, copy.deepcopy(chunk)))
-            self.tasks.add(task)
-            task.add_done_callback(self.tasks.remove)
+            future = self.executor.submit(
+                self.f_out.write, copy.deepcopy(chunk))
+            self.tasks.add(future)
+            future.add_done_callback(self.tasks.remove)
 
-    def _await_dump(self) -> None:
+    def _complete_dump(self) -> None:
         """
         Wait for all dump tasks to be completed, close the loop and file handle
         """
-        if self.loop and self.tasks:
-            self.loop.run_until_complete(asyncio.wait(self.tasks))
-            self.loop.close()
+        while len(self.tasks):
+            time.sleep(0.001)
 
         if self.f_out:
             self.f_out.close()
@@ -266,7 +265,8 @@ class StreamBuffer:
                 else:
                     return False
 
-    def buf_stream(self, buf_queue: Queue, stop_event: SyncEvent = None) -> None:
+    @nvtx.annotate()
+    def bufferize(self, buf_queue: Queue, stop_event: SyncEvent = None) -> None:
         """
         Takes video track from FFMpeg subprocess, puts in to queue. \\
         It is to be run in a separate process.
@@ -306,5 +306,5 @@ class StreamBuffer:
         buf_queue.close()
 
         # Wait for dump to complete and close file handle
-        self._await_dump()
+        self._complete_dump()
         self.proc.terminate()

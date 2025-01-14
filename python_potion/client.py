@@ -37,72 +37,216 @@ import python_potion.decoder as decoder
 import python_potion.converter as converter
 import python_vali as vali
 import time
-import asyncio
+import concurrent.futures
 
-from tritonclient.utils import InferenceServerException
+from tritonclient.utils import InferenceServerException, triton_to_np_dtype
 from argparse import Namespace
+
+import nvtx
 
 
 LOGGER = logging.getLogger(__file__)
 
 
 class ImageClient():
-    def __init__(self, flags: Namespace,):
+    def __init__(self, flags: Namespace, inp_queue: Queue,):
         """
         Constructor.
 
         Args:
             flags (Namespace): parsed CLI args
+            inp_queue (Queue): queue with video track chunks
 
         Raises:
             InferenceServerException: if triton throws an exception
         """
 
         self.gpu_id = flags.gpu_id
-
         self.flags = flags
 
         self.sent_cnt = 0
         self.recv_cnt = 0
 
-        self.res = vali.PySurfaceResizer(
-            vali.PixelFormat.RGB_32F, flags.gpu_id)
-        self.dwn = vali.PySurfaceDownloader(flags.gpu_id)
-
+        # Create triton client, parse model metadata and config
         self.triton_client = grpcclient.InferenceServerClient(
             url=self.flags.url, verbose=self.flags.verbose
         )
 
-        try:
-            self.model_metadata = self.triton_client.get_model_metadata(
-                model_name=self.flags.model_name, model_version=self.flags.model_version
-            )
-        except InferenceServerException as e:
-            LOGGER.fatal("failed to retrieve the metadata: " + str(e))
-            raise e
-
-        try:
-            self.model_config = self.triton_client.get_model_config(
-                model_name=self.flags.model_name, model_version=self.flags.model_version
-            ).config
-        except InferenceServerException as e:
-            LOGGER.fatal("failed to retrieve the config: " + str(e))
-            raise e
-
-        self.max_batch_size, self.input_name, self.output_name, self.c, self.h, self.w, self.format, self.dtype = self._parse_model(
-            self.model_metadata, self.model_config
+        self.model_metadata = self.triton_client.get_model_metadata(
+            model_name=self.flags.model_name, model_version=self.flags.model_version
         )
 
-        self.supports_batching = self.max_batch_size > 0
-        if not self.supports_batching and self.flags.batch_size != 1:
-            LOGGER.fatal("ERROR: This model doesn't support batching.")
-            raise e
+        self.model_config = self.triton_client.get_model_config(
+            model_name=self.flags.model_name, model_version=self.flags.model_version
+        ).config
 
+        self._parse_model()
+
+        # Create decoder, converter, downloader
+        self.dwn = vali.PySurfaceDownloader(flags.gpu_id)
+        self.dec = decoder.Decoder(inp_queue, self.flags)
+
+        params = {
+            "src_fmt": self.dec.format(),
+            "dst_fmt": vali.PixelFormat.RGB_32F_PLANAR,
+            "src_w": self.dec.width(),
+            "src_h": self.dec.height(),
+            "dst_w": self.w,
+            "dst_h": self.h
+        }
+
+        self.conv = converter.Converter(params, self.flags)
+
+        # Deal with batch size etc.
         self.batch_size = self.flags.batch_size
-        self.sent_cnt = 0
-        self.recv_cnt = 0
+        self.supports_batching = self.max_batch_size > 0
+        if not self.supports_batching and self.batch_size != 1:
+            raise RuntimeError("ERROR: This model doesn't support batching.")
 
-    async def _send(self, img: list[np.ndarray]) -> None:
+        # Async stuff
+        self.tasks = set()
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+    def _parse_model(self) -> None:
+        """
+        Check the configuration of a model to make sure it meets the
+        requirements for an image classification network (as expected by
+        this client)
+        """
+        if len(self.model_metadata.inputs) != 1:
+            raise Exception("expecting 1 input, got {}".format(
+                len(self.model_metadata.inputs)))
+
+        if len(self.model_metadata.outputs) != 1:
+            raise Exception(
+                "expecting 1 output, got {}".format(
+                    len(self.model_metadata.outputs))
+            )
+
+        if len(self.model_config.input) != 1:
+            raise Exception(
+                "expecting 1 input in model configuration, got {}".format(
+                    len(self.model_config.input)
+                )
+            )
+
+        input_metadata = self.model_metadata.inputs[0]
+        input_config = self.model_config.input[0]
+        output_metadata = self.model_metadata.outputs[0]
+
+        if output_metadata.datatype != "FP32":
+            raise Exception(
+                "expecting output datatype to be FP32, model '"
+                + self.model_metadata.name
+                + "' output type is "
+                + output_metadata.datatype
+            )
+
+        # Output is expected to be a vector. But allow any number of
+        # dimensions as long as all but 1 is size 1 (e.g. { 10 }, { 1, 10
+        # }, { 10, 1, 1 } are all ok). Ignore the batch dimension if there
+        # is one.
+        output_batch_dim = self.model_config.max_batch_size > 0
+        non_one_cnt = 0
+        for dim in output_metadata.shape:
+            if output_batch_dim:
+                output_batch_dim = False
+            elif dim > 1:
+                non_one_cnt += 1
+                if non_one_cnt > 1:
+                    raise Exception("expecting model output to be a vector")
+
+        # Model input must have 3 dims, either CHW or HWC (not counting
+        # the batch dimension), either CHW or HWC
+        input_batch_dim = self.model_config.max_batch_size > 0
+        expected_input_dims = 3 + (1 if input_batch_dim else 0)
+        if len(input_metadata.shape) != expected_input_dims:
+            raise Exception(
+                "expecting input to have {} dimensions, model '{}' input has {}".format(
+                    expected_input_dims, self.model_metadata.name, len(
+                        input_metadata.shape)
+                )
+            )
+
+        if type(input_config.format) == str:
+            FORMAT_ENUM_TO_INT = dict(mc.ModelInput.Format.items())
+            input_config.format = FORMAT_ENUM_TO_INT[input_config.format]
+
+        if (input_config.format != mc.ModelInput.FORMAT_NCHW) and (
+            input_config.format != mc.ModelInput.FORMAT_NHWC
+        ):
+            raise Exception(
+                "unexpected input format "
+                + mc.ModelInput.Format.Name(input_config.format)
+                + ", expecting "
+                + mc.ModelInput.Format.Name(mc.ModelInput.FORMAT_NCHW)
+                + " or "
+                + mc.ModelInput.Format.Name(mc.ModelInput.FORMAT_NHWC)
+            )
+
+        if input_config.format == mc.ModelInput.FORMAT_NHWC:
+            self.h = input_metadata.shape[1 if input_batch_dim else 0]
+            self.w = input_metadata.shape[2 if input_batch_dim else 1]
+            self.c = input_metadata.shape[3 if input_batch_dim else 2]
+        else:
+            self.c = input_metadata.shape[1 if input_batch_dim else 0]
+            self.h = input_metadata.shape[2 if input_batch_dim else 1]
+            self.w = input_metadata.shape[3 if input_batch_dim else 2]
+
+        self.max_batch_size = self.model_config.max_batch_size
+        self.output_name = output_metadata.name
+        self.input_name = input_metadata.name
+        self.dtype = input_metadata.datatype
+        self.format = input_config.format
+
+    def _make_req_data(self, batched_image_data):
+        """
+        Prepare inference request data
+
+        Args:
+            batched_image_data : numpy ndarray or list of that
+
+        Returns:
+            tuple with inference inputs and outputs
+        """
+
+        inputs = [grpcclient.InferInput(
+            self.input_name, batched_image_data.shape, self.dtype)]
+
+        inputs[0].set_data_from_numpy(batched_image_data)
+
+        outputs = [grpcclient.InferRequestedOutput(
+            self.output_name, class_count=self.flags.classes)]
+
+        return (inputs, outputs)
+
+    @nvtx.annotate()
+    def _process(self, results):
+        """
+        Process inference result and put it into stdout.
+
+        Args:
+            results (_type_): Inference result returned by Triton sever
+
+        Raises:
+            Exception: if batching is on and result rize doesn't match batch size
+        """
+
+        output_array = results.as_numpy(self.output_name)
+        assert len(output_array) == self.batch_size
+
+        for results in output_array:
+            if not self.supports_batching:
+                results = [results]
+            for result in results:
+                if output_array.dtype.type == np.object_:
+                    cls = "".join(chr(x) for x in result).split(":")
+                else:
+                    cls = result.split(":")
+                print("    {} ({}) = {}".format(cls[0], cls[1], cls[2]))
+
+    @nvtx.annotate()
+    def _send(self, img: list[np.ndarray]) -> None:
         """
         Send inference request, get response and write to stdout
 
@@ -130,210 +274,63 @@ class ImageClient():
         except InferenceServerException as e:
             LOGGER.error("Failed to send inference request: " + str(e))
 
-    def run_loop(self, inp_queue: Queue, buf_stop: SyncEvent,) -> None:
+    @nvtx.annotate()
+    def send_request(self, buf_stop: SyncEvent, start_time: float) -> bool:
         """
-        Inference loop.
-        Will set up sync event after run time has passed.
+        Submit single inference request.
+        If :arg:`buf_stop` is None, requests will be sent until there are decoded frames.
+        Otherwise :arg:`buf_stop` shall not be `None` and :arg:`start_time` shall be meaningful. 
+        In that case, request will be submitted until timeout is reached.
+        After that :arg:`buf_stop` will be set.
 
         Args:
-            inp_queue (Queue): queue with video track chunks
-            buf_stop (SyncEvent): sync event to set up
-        """
-
-        try:
-            dec = decoder.Decoder(inp_queue, self.flags)
-
-            params = {
-                "src_fmt": dec.format(),
-                "dst_fmt": vali.PixelFormat.RGB_32F_PLANAR,
-                "src_w": dec.width(),
-                "src_h": dec.height(),
-                "dst_w": self.w,
-                "dst_h": self.h
-            }
-
-            conv = converter.Converter(params, self.flags)
-
-        except Exception as e:
-            LOGGER.fatal(f"Failed to create decoder: {e}")
-            return
-
-        # Asyncio loop and send tasks
-        loop = asyncio.get_event_loop()
-        tasks = []
-
-        runtime = float(self.flags.time)
-        start = time.time()
-        while True:
-            # Signal stop
-            if time.time() - start > runtime:
-                buf_stop.set()
-
-            try:
-                # Decode Surface
-                surf_src = dec.decode()
-                if surf_src is None:
-                    break
-
-                # Process to match NN expectations
-                surf_dst = conv.run(surf_src)
-
-                # Download to numpy array
-                img = np.ndarray(
-                    shape=(self.c, self.h, self.w), dtype=np.float32)
-                success, info = self.dwn.Run(surf_dst, img)
-                if not success:
-                    LOGGER.error(f"Failed to download surface: {info}")
-                    continue
-
-                # Async send for inference
-                tasks.append(loop.create_task(self._send([img.copy()])))
-
-            except Exception as e:
-                LOGGER.error(
-                    f"Frame {self.sent_cnt}. Unexpected excepton: {str(e)}")
-                break
-
-        loop.run_until_complete(asyncio.wait(tasks))
-        loop.close()
-
-    def _parse_model(self, model_metadata, model_config):
-        """
-        Check the configuration of a model to make sure it meets the
-        requirements for an image classification network (as expected by
-        this client)
-        """
-        if len(model_metadata.inputs) != 1:
-            raise Exception("expecting 1 input, got {}".format(
-                len(model_metadata.inputs)))
-        if len(model_metadata.outputs) != 1:
-            raise Exception(
-                "expecting 1 output, got {}".format(
-                    len(model_metadata.outputs))
-            )
-
-        if len(model_config.input) != 1:
-            raise Exception(
-                "expecting 1 input in model configuration, got {}".format(
-                    len(model_config.input)
-                )
-            )
-
-        input_metadata = model_metadata.inputs[0]
-        input_config = model_config.input[0]
-        output_metadata = model_metadata.outputs[0]
-
-        if output_metadata.datatype != "FP32":
-            raise Exception(
-                "expecting output datatype to be FP32, model '"
-                + model_metadata.name
-                + "' output type is "
-                + output_metadata.datatype
-            )
-
-        # Output is expected to be a vector. But allow any number of
-        # dimensions as long as all but 1 is size 1 (e.g. { 10 }, { 1, 10
-        # }, { 10, 1, 1 } are all ok). Ignore the batch dimension if there
-        # is one.
-        output_batch_dim = model_config.max_batch_size > 0
-        non_one_cnt = 0
-        for dim in output_metadata.shape:
-            if output_batch_dim:
-                output_batch_dim = False
-            elif dim > 1:
-                non_one_cnt += 1
-                if non_one_cnt > 1:
-                    raise Exception("expecting model output to be a vector")
-
-        # Model input must have 3 dims, either CHW or HWC (not counting
-        # the batch dimension), either CHW or HWC
-        input_batch_dim = model_config.max_batch_size > 0
-        expected_input_dims = 3 + (1 if input_batch_dim else 0)
-        if len(input_metadata.shape) != expected_input_dims:
-            raise Exception(
-                "expecting input to have {} dimensions, model '{}' input has {}".format(
-                    expected_input_dims, model_metadata.name, len(
-                        input_metadata.shape)
-                )
-            )
-
-        if type(input_config.format) == str:
-            FORMAT_ENUM_TO_INT = dict(mc.ModelInput.Format.items())
-            input_config.format = FORMAT_ENUM_TO_INT[input_config.format]
-
-        if (input_config.format != mc.ModelInput.FORMAT_NCHW) and (
-            input_config.format != mc.ModelInput.FORMAT_NHWC
-        ):
-            raise Exception(
-                "unexpected input format "
-                + mc.ModelInput.Format.Name(input_config.format)
-                + ", expecting "
-                + mc.ModelInput.Format.Name(mc.ModelInput.FORMAT_NCHW)
-                + " or "
-                + mc.ModelInput.Format.Name(mc.ModelInput.FORMAT_NHWC)
-            )
-
-        if input_config.format == mc.ModelInput.FORMAT_NHWC:
-            h = input_metadata.shape[1 if input_batch_dim else 0]
-            w = input_metadata.shape[2 if input_batch_dim else 1]
-            c = input_metadata.shape[3 if input_batch_dim else 2]
-        else:
-            c = input_metadata.shape[1 if input_batch_dim else 0]
-            h = input_metadata.shape[2 if input_batch_dim else 1]
-            w = input_metadata.shape[3 if input_batch_dim else 2]
-
-        return (
-            model_config.max_batch_size,
-            input_metadata.name,
-            output_metadata.name,
-            c,
-            h,
-            w,
-            input_config.format,
-            input_metadata.datatype,
-        )
-
-    def _make_req_data(self, batched_image_data):
-        """
-        Prepare inference request data
-
-        Args:
-            batched_image_data : numpy ndarray or list of that
+            buf_stop (SyncEvent, optional): sync event to set up. Defaults to None (process all frames).
+            start_time (float, optional): start time, used to check for timeout. Defaults to None.
 
         Returns:
-            tuple with inference inputs and outputs
+            bool: True in case of successful request submission, False otherwise.
         """
 
-        inputs = [grpcclient.InferInput(
-            self.input_name, batched_image_data.shape, self.dtype)]
+        # Signal stop
+        if buf_stop is not None:
+            if time.time() - start_time > self.flags.time:
+                buf_stop.set()
 
-        inputs[0].set_data_from_numpy(batched_image_data)
+        try:
+            # Decode Surface
+            surf_src = self.dec.decode()
+            if surf_src is None:
+                return False
 
-        outputs = [grpcclient.InferRequestedOutput(
-            self.output_name, class_count=self.flags.classes)]
+            # Process to match NN expectations
+            surf_dst = self.conv.convert(surf_src)
+            if surf_dst is None:
+                return False
 
-        return (inputs, outputs)
+            # Download to RAM
+            img = np.ndarray(shape=(self.c, self.h, self.w),
+                             dtype=triton_to_np_dtype(self.dtype))
+            success, info = self.dwn.Run(surf_dst, img)
+            if not success:
+                LOGGER.error(f"Failed to download surface: {info}")
+                return False
 
-    def _process(self, results):
+            # Create inference request task
+            future = self.executor.submit(self._send, [img])
+            self.tasks.add(future)
+            future.add_done_callback(self.tasks.remove)
+
+        except Exception as e:
+            LOGGER.error(
+                f"Frame {self.sent_cnt}. Unexpected excepton: {str(e)}")
+            return False
+
+        return True
+
+    def complete_requests(self) -> None:
         """
-        Process inference result and put it into stdout.
-
-        Args:
-            results (_type_): Inference result returned by Triton sever
-
-        Raises:
-            Exception: if batching is on and result rize doesn't match batch size
+        Won't return unless task set is empty.
         """
 
-        output_array = results.as_numpy(self.output_name)
-        assert len(output_array) == self.batch_size
-
-        for results in output_array:
-            if not self.supports_batching:
-                results = [results]
-            for result in results:
-                if output_array.dtype.type == np.object_:
-                    cls = "".join(chr(x) for x in result).split(":")
-                else:
-                    cls = result.split(":")
-                print("    {} ({}) = {}".format(cls[0], cls[1], cls[2]))
+        while len(self.tasks):
+            time.sleep(0.001)

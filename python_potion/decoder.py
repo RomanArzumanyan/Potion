@@ -18,6 +18,8 @@ import logging
 from multiprocessing.synchronize import Event as SyncEvent
 from argparse import Namespace
 
+import nvtx
+
 LOGGER = logging.getLogger(__file__)
 
 
@@ -69,6 +71,12 @@ class QueueAdapter:
 
 
 class Decoder:
+    """
+    Decoder class which takes video track chunks from queue.
+    Returns reconstructed video frames as VALI Surfaces.
+    It owns the decoded Surface, clone it if needed.
+    """
+
     def __init__(self,
                  inp_queue: Queue,
                  flags: Namespace,):
@@ -123,12 +131,13 @@ class Decoder:
     def format(self) -> vali.PixelFormat:
         """
         Get video pixel format.
-        
+
         Returns:
             vali.PixelFormat: pixel format
         """
         return self.py_dec.Format
 
+    @nvtx.annotate()
     def decode(self) -> vali.Surface:
         """
         Decode single video frame. When decoding is done, will return None.

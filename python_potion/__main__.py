@@ -19,6 +19,7 @@ import argparse
 import python_potion.common as common
 import python_potion.buffering as buffering
 import python_potion.client as image_client
+import time
 
 LOGGER = logging.getLogger(__file__)
 
@@ -32,20 +33,28 @@ def main(flags: argparse.Namespace) -> None:
 
     # 1.2
     # This process reads video track and puts chunks into variable size queue.
-    buf_proc_stop = mp.Event()
+    buf_proc_stop = mp.Event() if flags.time > 0.0 else None
     buf_proc = Process(
-        target=buf_class.buf_stream,
+        target=buf_class.bufferize,
         args=(buf_queue, buf_proc_stop),
     )
     buf_proc.start()
 
+    # 1.3
+    # Start wallclock time
+    start_time = time.time()
+
     # 2.1
     # Start inference in current process.
     # It will take input from queue, decode and send images to triton inference server.
-    client = image_client.ImageClient(flags)
+    client = image_client.ImageClient(flags, buf_queue)
 
-    # 2.2 Inference client will signal buf_proc to stop after timeout
-    client.run_loop(buf_queue, buf_proc_stop)
+    # 2.2
+    # Send inference requests
+    # Client will signal buf_proc to stop after timeout
+    while client.send_request(buf_proc_stop, start_time):
+        pass
+    client.complete_requests()
 
     # 3.1
     # Stop buf_stream process.

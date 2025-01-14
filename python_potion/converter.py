@@ -15,10 +15,17 @@ import logging
 from typing import Dict
 from argparse import Namespace
 
+import nvtx
+
 LOGGER = logging.getLogger(__file__)
 
 
 class Converter:
+    """
+    Use this class for color / data type conversion and resize.
+    It owns the converted Surface, clone it if needed.
+    """
+
     def __init__(self, params: Dict, flags: Namespace):
         """
         Constructor
@@ -28,8 +35,22 @@ class Converter:
             flags (Namespace): parsed CLI args
 
         Raises:
-            RuntimeError: if input or output formats aren't supported
+            RuntimeError: if input or output formats aren't supported or one of
+            requested parameters is missing
         """
+        self.req_par = [
+            "src_fmt",
+            "dst_fmt",
+            "src_w",
+            "src_h",
+            "dst_w",
+            "dst_h"
+        ]
+
+        for param in self.req_par:
+            if not param in params.keys():
+                raise RuntimeError(
+                    f"Parameter {param} not found. Required params: {self.req_par}")
 
         self.src_fmt = params["src_fmt"]
         self.dst_fmt = params["dst_fmt"]
@@ -89,7 +110,17 @@ class Converter:
                               self.dst_h, flags.gpu_id)
         )
 
-    def run(self, surf_src: vali.Surface) -> vali.Surface:
+    def req_params(self) -> list[str]:
+        """
+        Get list of required converter parameters.
+
+        Returns:
+            list[str]: list of parameters
+        """
+        return self.req_params
+
+    @nvtx.annotate()
+    def convert(self, surf_src: vali.Surface) -> vali.Surface:
         """
         Runs color conversion and resize if necessary
 

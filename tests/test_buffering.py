@@ -112,7 +112,7 @@ class TestOnLocalStream(unittest.TestCase):
         buf = buffering.StreamBuffer(self.flags)
         buf_queue = Queue(maxsize=0)
         buf_proc = Process(
-            target=buf.buf_stream,
+            target=buf.bufferize,
             args=(buf_queue, None),
         )
 
@@ -138,7 +138,7 @@ class TestOnLocalStream(unittest.TestCase):
         buf = buffering.StreamBuffer(flags)
         buf_queue = Queue(maxsize=0)
         buf_proc = Process(
-            target=buf.buf_stream,
+            target=buf.bufferize,
             args=(buf_queue, None),
         )
 
@@ -163,7 +163,7 @@ class TestOnLocalStream(unittest.TestCase):
         buf_queue = Queue(maxsize=0)
         buf_proc_stop = mp.Event()
         buf_proc = Process(
-            target=buf.buf_stream,
+            target=buf.bufferize,
             args=(buf_queue, buf_proc_stop),
         )
 

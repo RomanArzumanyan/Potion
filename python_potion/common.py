@@ -36,8 +36,9 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-t",
         "--time",
-        type=str,
-        required=True,
+        type=float,
+        required=False,
+        default=-1.0,
         help="processing time, s.",
     )
     parser.add_argument(

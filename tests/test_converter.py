@@ -41,7 +41,7 @@ class TestConverter(unittest.TestCase):
         buf = buffering.StreamBuffer(self.flags)
         buf_queue = Queue(maxsize=0)
         buf_proc = Process(
-            target=buf.buf_stream,
+            target=buf.bufferize,
             args=(buf_queue, None),
         )
 
@@ -65,7 +65,7 @@ class TestConverter(unittest.TestCase):
             if not surf_src:
                 break
 
-            surf_dst = cvt.run(surf_src)
+            surf_dst = cvt.convert(surf_src)
             if not surf_dst:
                 break
 

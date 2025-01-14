@@ -38,7 +38,7 @@ class TestDecoder(unittest.TestCase):
         buf = buffering.StreamBuffer(self.flags)
         buf_queue = Queue(maxsize=0)
         buf_proc = Process(
-            target=buf.buf_stream,
+            target=buf.bufferize,
             args=(buf_queue, None),
         )
 
@@ -63,7 +63,7 @@ class TestDecoder(unittest.TestCase):
         buf = buffering.StreamBuffer(self.flags)
         buf_queue = Queue(maxsize=0)
         buf_proc = Process(
-            target=buf.buf_stream,
+            target=buf.bufferize,
             args=(buf_queue, None),
         )
 

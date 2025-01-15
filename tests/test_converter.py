@@ -15,14 +15,17 @@ import unittest
 import test_common as tc
 import python_potion.buffering as buffering
 import python_potion.decoder as decoder
+import python_potion.converter as converter
+import python_vali as vali
 
 from multiprocessing import Queue, Process
 
 GT_FILENAME = "gt_files.json"
 TEST_CASE = "basic"
+THRESHOLD = 0.05
 
 
-class TestDecoder(unittest.TestCase):
+class TestConverter(unittest.TestCase):
     def __init__(self, methodName):
         super().__init__(methodName)
 
@@ -45,34 +48,29 @@ class TestDecoder(unittest.TestCase):
         buf_proc.start()
 
         dec = decoder.Decoder(buf_queue, self.flags)
+
+        # Most common VGG input params.
+        params = {
+            "src_fmt": dec.format(),
+            "dst_fmt": vali.PixelFormat.RGB_32F_PLANAR,
+            "src_w": dec.width(),
+            "src_h": dec.height(),
+            "dst_w": 224,
+            "dst_h": 224
+        }
+        cvt = converter.Converter(params, self.flags)
+
         while True:
-            surf = dec.decode()
-            if not surf:
+            surf_src = dec.decode()
+            if not surf_src:
                 break
 
-            self.assertEqual(surf.Width, self.gt["width"])
-            self.assertEqual(surf.Height, self.gt["height"])
-            self.assertEqual(str(surf.Format), self.gt["format"])
+            surf_dst = cvt.convert(surf_src)
+            if not surf_dst:
+                break
 
-        buf_proc.join()
+            self.assertEqual(surf_dst.Width, params["dst_w"])
+            self.assertEqual(surf_dst.Height, params["dst_h"])
+            self.assertEqual(surf_dst.Format, params["dst_fmt"])
 
-    def test_num_frames(self):
-        """
-        Check if all video frames are decoded
-        """
-        buf = buffering.StreamBuffer(self.flags)
-        buf_queue = Queue(maxsize=0)
-        buf_proc = Process(
-            target=buf.bufferize,
-            args=(buf_queue, None),
-        )
-
-        buf_proc.start()
-
-        dec = decoder.Decoder(buf_queue, self.flags)
-        dec_cnt = 0
-        while dec.decode() is not None:
-            dec_cnt += 1
-
-        self.assertEqual(dec_cnt, self.gt["num_frames"])
         buf_proc.join()

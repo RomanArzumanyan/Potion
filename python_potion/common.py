@@ -11,6 +11,34 @@
 # limitations under the License.
 
 import argparse
+from multiprocessing import Queue, Process
+from queue import Empty
+
+
+def drain(q: Queue) -> int:
+    """
+    Drain queue. Will not return unless :arg:`q` is empty.
+
+    Args:
+        q (Queue): input queue.
+
+    Returns:
+        int: drained data size.
+    """
+    size = 0
+    while True:
+        try:
+            chunk = q.get_nowait()
+            if chunk is None:
+                return size
+            size += len(chunk)
+
+        except Empty:
+            continue
+
+        except ValueError:
+            break
+    return size
 
 
 def get_parser() -> argparse.ArgumentParser:
@@ -36,8 +64,9 @@ def get_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-t",
         "--time",
-        type=str,
-        required=True,
+        type=float,
+        required=False,
+        default=-1.0,
         help="processing time, s.",
     )
     parser.add_argument(

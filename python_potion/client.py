@@ -41,11 +41,18 @@ import concurrent.futures
 
 from tritonclient.utils import InferenceServerException, triton_to_np_dtype
 from argparse import Namespace
+from enum import Enum
 
 import nvtx
 
 
 LOGGER = logging.getLogger(__file__)
+
+
+class ClientState(Enum):
+    RUNNING = 0,
+    EOF = 1,
+    ERROR = 2
 
 
 class ImageClient():
@@ -275,11 +282,12 @@ class ImageClient():
             LOGGER.error("Failed to send inference request: " + str(e))
 
     @nvtx.annotate()
-    def send_request(self, buf_stop: SyncEvent, start_time: float) -> bool:
+    def send_request(self, buf_stop: SyncEvent, start_time: float) -> tuple[bool, bool]:
         """
         Submit single inference request.
         If :arg:`buf_stop` is None, requests will be sent until there are decoded frames.
-        Otherwise :arg:`buf_stop` shall not be `None` and :arg:`start_time` shall be meaningful. 
+        Otherwise :arg:`buf_stop` shall not be `None` and :arg:`start_time` shall be positive.
+        If :arg:`buf_stop`: is not None but :arg:`start_time` is negative, it will be ignored.
         In that case, request will be submitted until timeout is reached.
         After that :arg:`buf_stop` will be set.
 
@@ -292,7 +300,7 @@ class ImageClient():
         """
 
         # Signal stop
-        if buf_stop is not None:
+        if buf_stop is not None and self.flags.time > 0.0:
             if time.time() - start_time > self.flags.time:
                 buf_stop.set()
 

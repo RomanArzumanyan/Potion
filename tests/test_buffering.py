@@ -16,41 +16,15 @@ import unittest
 import test_common as tc
 import multiprocessing as mp
 import python_potion.buffering as buffering
+import python_potion.common as common
 
 from multiprocessing import Queue, Process
 from pathlib import Path
 from parameterized import parameterized
-from queue import Empty
 
 GT_FILENAME = "gt_files.json"
 TEST_CASE = "basic"
 THRESHOLD = 0.05
-
-
-def drain(q: Queue) -> int:
-    """
-    Drain queue. Will not return unless :arg:`q` is empty.
-
-    Args:
-        q (Queue): input queue.
-
-    Returns:
-        int: drained data size.
-    """
-    size = 0
-    while True:
-        try:
-            chunk = q.get_nowait()
-            if chunk is None:
-                return size
-            size += len(chunk)
-
-        except Empty:
-            continue
-
-        except ValueError:
-            break
-    return size
 
 
 class TestOnLocalStream(unittest.TestCase):
@@ -117,7 +91,7 @@ class TestOnLocalStream(unittest.TestCase):
         )
 
         buf_proc.start()
-        chunk_size = drain(buf_queue)
+        chunk_size = common.drain(buf_queue)
         buf_proc.join()
 
         file_size = float(self.gt["filesize"])
@@ -143,7 +117,7 @@ class TestOnLocalStream(unittest.TestCase):
         )
 
         buf_proc.start()
-        drain(buf_queue)
+        common.drain(buf_queue)
         buf_proc.join()
 
         if not len(dump_fname):
@@ -161,15 +135,15 @@ class TestOnLocalStream(unittest.TestCase):
 
         buf = buffering.StreamBuffer(self.flags)
         buf_queue = Queue(maxsize=0)
-        buf_proc_stop = mp.Event()
+        buf_stop = mp.Event()
         buf_proc = Process(
             target=buf.bufferize,
-            args=(buf_queue, buf_proc_stop),
+            args=(buf_queue, buf_stop),
         )
 
         # Can't guarantee what amount of input will be processed when process
         # is stopped. So if the test finishes it's considered success.
         buf_proc.start()
-        buf_proc_stop.set()
-        drain(buf_queue)
+        buf_stop.set()
+        common.drain(buf_queue)
         buf_proc.join()

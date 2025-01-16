@@ -316,6 +316,7 @@ class ImageClient():
                 return False
 
             # Download to RAM
+            # Acts as sync point on previous async GPU operations
             img = np.ndarray(shape=(self.c, self.h, self.w),
                              dtype=triton_to_np_dtype(self.dtype))
             success, info = self.dwn.Run(surf_dst, img)

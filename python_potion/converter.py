@@ -122,7 +122,10 @@ class Converter:
     @nvtx.annotate()
     def convert(self, surf_src: vali.Surface) -> vali.Surface:
         """
-        Runs color conversion and resize if necessary
+        Runs color conversion and resize if necessary. \
+        All operations are run in async fashion without and CUDA Events being record. \
+        This is done on purpose, since a blocking DtoH CUDA memcpy call shall be done to read
+        Surface into RAM and send for inference. 
 
         Args:
             surf_src (vali.Surface): input surface
@@ -142,14 +145,17 @@ class Converter:
 
         # Resize
         if self.need_resize:
-            success, info = self.resz.Run(surf_src, self.surf[0])
+            success, info, _ = self.resz.RunAsync(
+                src=surf_src, dst=self.surf[0], record_event=False)
             if not success:
                 LOGGER.error(f"Failed to resize surface: {info}")
                 return None
 
-        # Color conversion
+        # Color conversion.
         for i in range(0, len(self.conv)):
-            success, info = self.conv[i].Run(self.surf[i], self.surf[i+1])
+            success, info, _ = self.conv[i].RunAsync(
+                src=self.surf[i], dst=self.surf[i+1], record_event=False)
+
             if not success:
                 LOGGER.error(f"Failed to convert surface: {info}")
                 return None

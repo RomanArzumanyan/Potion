@@ -1,5 +1,5 @@
 numpy
 nvtx==0.2.10
 parameterized==0.9.0
-python_vali==4.2.4.post0
+python_vali==4.2.6.post0
 tritonclient==2.53.0

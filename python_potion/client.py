@@ -95,7 +95,7 @@ class ImageClient():
 
         params = {
             "src_fmt": self.dec.format(),
-            "dst_fmt": vali.PixelFormat.RGB_32F_PLANAR,
+            "dst_fmt": self._get_pix_fmt(),
             "src_w": self.dec.width(),
             "src_h": self.dec.height(),
             "dst_w": self.w,
@@ -114,6 +114,31 @@ class ImageClient():
         self.tasks = set()
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
+    def _get_pix_fmt(self) -> vali.PixelFormat:
+        """
+        Get target pixel format from model metadata
+
+        Raises:
+            ValueError: if data type or format is not supported
+
+        Returns:
+            vali.PixelFormat: target pixel format
+        """
+        supp_types = ["UINT8", "FP32"]
+        if not self.dtype in supp_types:
+            raise ValueError(
+                f"Unsupported datatype {self.dtype}. Not in {supp_types}")
+
+        supp_fmts = [mc.ModelInput.FORMAT_NHWC, mc.ModelInput.FORMAT_NCHW]
+        if not self.format in supp_fmts:
+            raise ValueError(
+                f"Unsupported format {self.format}. Not in {supp_fmts}")
+
+        if self.dtype == "UINT8":
+            return vali.PixelFormat.RGB if self.format == mc.ModelInput.FORMAT_NHWC else vali.PixelFormat.RGB_PLANAR
+        else:
+            return vali.PixelFormat.RGB_32F if self.format == mc.ModelInput.FORMAT_NHWC else vali.PixelFormat.RGB_32F_PLANAR
+
     def _parse_model(self) -> None:
         """
         Check the configuration of a model to make sure it meets the
@@ -123,12 +148,6 @@ class ImageClient():
         if len(self.model_metadata.inputs) != 1:
             raise Exception("expecting 1 input, got {}".format(
                 len(self.model_metadata.inputs)))
-
-        if len(self.model_metadata.outputs) != 1:
-            raise Exception(
-                "expecting 1 output, got {}".format(
-                    len(self.model_metadata.outputs))
-            )
 
         if len(self.model_config.input) != 1:
             raise Exception(

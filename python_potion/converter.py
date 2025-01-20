@@ -20,6 +20,48 @@ import nvtx
 LOGGER = logging.getLogger(__file__)
 
 
+def BFS_SP(graph, start, goal) -> list:
+    explored = []
+
+    # Queue for traversing the
+    # graph in the BFS
+    queue = [[start]]
+
+    # If the desired node is
+    # reached
+    if start == goal:
+        return [start]
+
+    # Loop to traverse the graph
+    # with the help of the queue
+    while queue:
+        path = queue.pop(0)
+        node = path[-1]
+
+        # Condition to check if the
+        # current node is not visited
+        if node not in explored:
+            neighbours = graph[node]
+
+            # Loop to iterate over the
+            # neighbours of the node
+            for neighbour in neighbours:
+                new_path = list(path)
+                new_path.append(neighbour)
+                queue.append(new_path)
+
+                # Condition to check if the
+                # neighbour node is the goal
+                if neighbour == goal:
+                    return new_path
+
+            explored.append(node)
+
+    # Condition when the nodes
+    # are not connected
+    raise RuntimeError("Connecting path doesn't exist")
+
+
 class Converter:
     """
     Use this class for color / data type conversion and resize.
@@ -60,6 +102,11 @@ class Converter:
         self.dst_w = params["dst_w"]
         self.dst_h = params["dst_h"]
 
+        print(self._build_conv_chain(
+            vali.PixelFormat.NV12,
+            vali.PixelFormat.RGB_32F_PLANAR
+        ))
+
         # Only (semi-)planar yuv420 input is supported.
         fmts = [vali.PixelFormat.NV12, vali.PixelFormat.YUV420]
         if not self.src_fmt in fmts:
@@ -67,7 +114,12 @@ class Converter:
                               f"Supported formats: {fmts}")
 
         # Only packed / planar float32 output is supported.
-        fmts = [vali.PixelFormat.RGB_32F, vali.PixelFormat.RGB_32F_PLANAR]
+        fmts = [
+            vali.PixelFormat.RGB,
+            vali.PixelFormat.RGB_32F,
+            vali.PixelFormat.RGB_PLANAR,
+            vali.PixelFormat.RGB_32F_PLANAR,
+        ]
         if not self.dst_fmt in fmts:
            raise RuntimeError(f"Unsupported output format {self.dst_fmt}\n"
                               f"Supported formats: {fmts}")
@@ -109,6 +161,17 @@ class Converter:
             vali.Surface.Make(self.dst_fmt, self.dst_w,
                               self.dst_h, flags.gpu_id)
         )
+
+    def _build_conv_chain(self, src: vali.PixelFormat, dst: vali.PixelFormat):
+        convs = {}
+
+        for conv in vali.PySurfaceConverter.Conversions():
+            key, val = conv[0], conv[1]
+            if not key in convs.keys():
+                convs[key] = []
+            convs[key].append(val)
+
+        return BFS_SP(convs, src, dst)
 
     def req_params(self) -> list[str]:
         """

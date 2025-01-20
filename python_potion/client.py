@@ -114,6 +114,23 @@ class ImageClient():
         self.tasks = set()
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
+    def _get_shape(self) -> tuple:
+        """
+        Get target tensor shape
+
+        Raises:
+            RuntimeError: if format isn't supported
+
+        Returns:
+            tuple: tuple with shape
+        """
+        if self.format == mc.ModelInput.FORMAT_NCHW:
+            return (self.c, self.h, self.w)
+        elif self.format == mc.ModelInput.FORMAT_NHWC:
+            return (self.h, self.w, self.c)
+        else:
+            raise RuntimeError(f"Unsupported shape")
+
     def _get_pix_fmt(self) -> vali.PixelFormat:
         """
         Get target pixel format from model metadata
@@ -336,7 +353,7 @@ class ImageClient():
 
             # Download to RAM
             # Acts as sync point on previous async GPU operations
-            img = np.ndarray(shape=(self.c, self.h, self.w),
+            img = np.ndarray(shape=self._get_shape(),
                              dtype=triton_to_np_dtype(self.dtype))
             success, info = self.dwn.Run(surf_dst, img)
             if not success:

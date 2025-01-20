@@ -14,52 +14,11 @@ import python_vali as vali
 import logging
 from typing import Dict
 from argparse import Namespace
+import python_potion.common as common
 
 import nvtx
 
 LOGGER = logging.getLogger(__file__)
-
-
-def BFS_SP(graph, start, goal) -> list:
-    explored = []
-
-    # Queue for traversing the
-    # graph in the BFS
-    queue = [[start]]
-
-    # If the desired node is
-    # reached
-    if start == goal:
-        return [start]
-
-    # Loop to traverse the graph
-    # with the help of the queue
-    while queue:
-        path = queue.pop(0)
-        node = path[-1]
-
-        # Condition to check if the
-        # current node is not visited
-        if node not in explored:
-            neighbours = graph[node]
-
-            # Loop to iterate over the
-            # neighbours of the node
-            for neighbour in neighbours:
-                new_path = list(path)
-                new_path.append(neighbour)
-                queue.append(new_path)
-
-                # Condition to check if the
-                # neighbour node is the goal
-                if neighbour == goal:
-                    return new_path
-
-            explored.append(node)
-
-    # Condition when the nodes
-    # are not connected
-    raise RuntimeError("Connecting path doesn't exist")
 
 
 class Converter:
@@ -94,6 +53,8 @@ class Converter:
                 raise RuntimeError(
                     f"Parameter {param} not found. Required params: {self.req_par}")
 
+        self.flags = flags
+
         self.src_fmt = params["src_fmt"]
         self.dst_fmt = params["dst_fmt"]
 
@@ -102,18 +63,13 @@ class Converter:
         self.dst_w = params["dst_w"]
         self.dst_h = params["dst_h"]
 
-        print(self._build_conv_chain(
-            vali.PixelFormat.NV12,
-            vali.PixelFormat.RGB_32F_PLANAR
-        ))
-
         # Only (semi-)planar yuv420 input is supported.
         fmts = [vali.PixelFormat.NV12, vali.PixelFormat.YUV420]
         if not self.src_fmt in fmts:
            raise RuntimeError(f"Unsupported input format {self.src_fmt}\n"
                               f"Supported formats: {fmts}")
 
-        # Only packed / planar float32 output is supported.
+        # Only RGB output is supported.
         fmts = [
             vali.PixelFormat.RGB,
             vali.PixelFormat.RGB_32F,
@@ -124,54 +80,51 @@ class Converter:
            raise RuntimeError(f"Unsupported output format {self.dst_fmt}\n"
                               f"Supported formats: {fmts}")
 
-        # Surfaces for conversion chain
-        self.surf = [
-            vali.Surface.Make(vali.PixelFormat.RGB,
-                              self.dst_w, self.dst_h, flags.gpu_id)
-        ]
+        self._build_chain(self.src_fmt, self.dst_fmt)
 
-        self.need_resize = self.src_w != self.dst_w or self.src_h != self.dst_h
-        if self.need_resize:
-            # Resize input Surface to decrease amount of pixels to be further processed
-            self.resz = vali.PySurfaceResizer(self.src_fmt, flags.gpu_id)
-            self.surf.insert(0, vali.Surface.Make(
-                self.src_fmt, self.dst_w, self.dst_h, flags.gpu_id))
+    def _build_chain(self, src: vali.PixelFormat, dst: vali.PixelFormat):
+        """
+        Build color conversion chain
 
-        # Converters
-        self.conv = [
-            vali.PySurfaceConverter(
-                self.src_fmt, vali.PixelFormat.RGB, flags.gpu_id),
+        Args:
+            src (vali.PixelFormat): input pixel format
+            dst (vali.PixelFormat): NN target pixel format
 
-            vali.PySurfaceConverter(
-                vali.PixelFormat.RGB, vali.PixelFormat.RGB_32F, flags.gpu_id),
-        ]
+        Raises:
+            RuntimeError: if chain can't be built
+        """
 
-        if self.dst_fmt == vali.PixelFormat.RGB_32F_PLANAR:
-            self.surf.append(
-                vali.Surface.Make(
-                    vali.PixelFormat.RGB_32F, self.dst_w, self.dst_h, flags.gpu_id)
-            )
-
-            self.conv.append(
-                vali.PySurfaceConverter(
-                    vali.PixelFormat.RGB_32F, vali.PixelFormat.RGB_32F_PLANAR, flags.gpu_id)
-            )
-
-        self.surf.append(
-            vali.Surface.Make(self.dst_fmt, self.dst_w,
-                              self.dst_h, flags.gpu_id)
-        )
-
-    def _build_conv_chain(self, src: vali.PixelFormat, dst: vali.PixelFormat):
+        # Get list of supported conversion and generate adjacency matrix
         convs = {}
-
         for conv in vali.PySurfaceConverter.Conversions():
             key, val = conv[0], conv[1]
             if not key in convs.keys():
                 convs[key] = []
             convs[key].append(val)
 
-        return BFS_SP(convs, src, dst)
+        # Find shortest path in graph by given adj matrix
+        chain = common.find_shortest_path(convs, src, dst)
+        if len(chain) < 2:
+            raise RuntimeError(
+                f"Can't build color conversion chain from {src} to {dst}")
+
+        # Create converters
+        self.conv = []
+        for i in range(0, len(chain) - 1):
+            self.conv.append(vali.PySurfaceConverter(
+                chain[i], chain[i+1], self.flags.gpu_id)
+            )
+
+        # Create surfaces and resizer
+        self.surf = []
+        self.need_resize = self.src_w != self.dst_w or self.src_h != self.dst_h
+        start_idx = 1 - int(self.need_resize)
+        for i in range(start_idx, len(chain)):
+            self.surf.append(vali.Surface.Make(
+                chain[i], self.dst_w, self.dst_h, self.flags.gpu_id))
+
+        if self.need_resize:
+            self.resz = vali.PySurfaceResizer(self.src_fmt, self.flags.gpu_id)
 
     def req_params(self) -> list[str]:
         """
@@ -183,7 +136,7 @@ class Converter:
         return self.req_params
 
     @nvtx.annotate()
-    def convert(self, surf_src: vali.Surface) -> vali.Surface:
+    def convert(self, surf_src: vali.Surface, sync=False) -> vali.Surface:
         """
         Runs color conversion and resize if necessary. \
         All operations are run in async fashion without and CUDA Events being record. \
@@ -192,6 +145,8 @@ class Converter:
 
         Args:
             surf_src (vali.Surface): input surface
+            sync (Bool): if True, will record and sync on last conversion, otherwise
+            won't record and sync on any operations
 
         Returns:
             vali.Surface: Surface with converted pixels.
@@ -215,12 +170,17 @@ class Converter:
                 return None
 
         # Color conversion.
+        event = None
         for i in range(0, len(self.conv)):
-            success, info, _ = self.conv[i].RunAsync(
-                src=self.surf[i], dst=self.surf[i+1], record_event=False)
+            record = sync and i == len(self.conv) - 1
+            success, info, event = self.conv[i].RunAsync(
+                src=self.surf[i], dst=self.surf[i+1], record_event=record)
 
             if not success:
                 LOGGER.error(f"Failed to convert surface: {info}")
                 return None
+
+        if event:
+            event.Wait()
 
         return self.surf[-1]

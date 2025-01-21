@@ -27,18 +27,20 @@ class Converter:
     It owns the converted Surface, clone it if needed.
     """
 
-    def __init__(self, params: Dict, flags: Namespace):
+    def __init__(self, params: Dict, flags: Namespace, cuda_stream: int = None):
         """
         Constructor
 
         Args:
             params (Dict): dictionary with parameters
             flags (Namespace): parsed CLI args
+            cuda_stream (int, optional): CUDA stream to use. Defaults to None.
 
         Raises:
             RuntimeError: if input or output formats aren't supported or one of
             requested parameters is missing
         """
+
         self.req_par = [
             "src_fmt",
             "dst_fmt",
@@ -62,6 +64,8 @@ class Converter:
         self.src_h = params["src_h"]
         self.dst_w = params["dst_w"]
         self.dst_h = params["dst_h"]
+
+        self.cuda_stream = cuda_stream
 
         # Only (semi-)planar yuv420 input is supported.
         fmts = [vali.PixelFormat.NV12, vali.PixelFormat.YUV420]
@@ -112,7 +116,7 @@ class Converter:
         self.conv = []
         for i in range(0, len(chain) - 1):
             self.conv.append(vali.PySurfaceConverter(
-                chain[i], chain[i+1], self.flags.gpu_id)
+                chain[i], chain[i+1], self.flags.gpu_id if not self.cuda_stream else self.cuda_stream)
             )
 
         # Create surfaces and resizer
@@ -124,7 +128,8 @@ class Converter:
                 chain[i], self.dst_w, self.dst_h, self.flags.gpu_id))
 
         if self.need_resize:
-            self.resz = vali.PySurfaceResizer(self.src_fmt, self.flags.gpu_id)
+            self.resz = vali.PySurfaceResizer(
+                self.src_fmt, self.flags.gpu_id if not self.cuda_stream else self.cuda_stream)
 
     def req_params(self) -> list[str]:
         """

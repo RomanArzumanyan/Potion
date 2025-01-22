@@ -37,6 +37,7 @@ import python_potion.decoder as decoder
 import python_potion.converter as converter
 import python_vali as vali
 import time
+import struct
 import concurrent.futures
 
 from tritonclient.utils import InferenceServerException, triton_to_np_dtype
@@ -240,7 +241,7 @@ class ImageClient():
         return (inputs, outputs)
 
     @nvtx.annotate()
-    def _process(self, results) -> None:
+    def _process(self, results, request_id) -> None:
         """
         Process inference result and put it into stdout.
 
@@ -248,11 +249,12 @@ class ImageClient():
             results (_type_): Inference result returned by Triton sever
 
         """
-        res = {}
+        obj = {}
+        res = {request_id: obj}
         for name in self.output_names:
-            res[name] = results.as_numpy(name)
-
-        self.results.put(res)
+            obj[name] = results.as_numpy(name)
+            res[request_id] = obj
+            self.results.put(res)
 
     @nvtx.annotate()
     def _signal_end(self) -> None:
@@ -269,7 +271,7 @@ class ImageClient():
         future.add_done_callback(self.tasks.remove)
 
     @nvtx.annotate()
-    def _send(self, img: list[np.ndarray]) -> None:
+    def _send(self, img: list[np.ndarray], request_id: str) -> None:
         """
         Send inference request, get response and write to stdout
 
@@ -288,10 +290,10 @@ class ImageClient():
                 inputs,
                 self.flags.model_version,
                 outputs,
-                str(self.num_surf)
+                request_id
             )
 
-            self._process(response)
+            self._process(response, request_id)
             self.num_resp += 1
 
         except InferenceServerException as e:
@@ -344,7 +346,8 @@ class ImageClient():
                 return False
 
             # Create inference request task
-            future = self.executor.submit(self._send, [img])
+            future = self.executor.submit(
+                self._send, [img.copy()], str(self.num_surf))
             self.tasks.add(future)
             future.add_done_callback(self.tasks.remove)
 

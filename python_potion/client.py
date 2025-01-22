@@ -362,7 +362,6 @@ class ImageClient():
 
         return True
 
-    @nvtx.annotate()
     def get_response(self) -> tuple[bool, dict]:
         """
         Get inference response

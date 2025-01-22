@@ -41,7 +41,7 @@ def main(flags: argparse.Namespace) -> None:
     buf_proc.start()
 
     # 1.3
-    # Start wallclock time
+    # Start wallclock time.
     start_time = time.time()
 
     # 2.1
@@ -51,19 +51,19 @@ def main(flags: argparse.Namespace) -> None:
 
     # 2.2
     # Send inference requests and get response if there are any.
-    # Client will signal buf_proc to stop after timeout
+    # Client will signal buf_proc to stop after timeout.
     counter = 2
     while counter > 0:
+        # Decoder will run out of frames first.
         if counter > 1:
             counter -= not client.send_request(buf_stop, start_time)
 
+        # Then we drain responses from server.
         if counter > 0:
             more_to_come, res = client.get_response()
             if res:
                 print(res)
             counter -= not more_to_come
-        else:
-            print(f"inference done")
 
     # 3.1
     # Join buffering process.

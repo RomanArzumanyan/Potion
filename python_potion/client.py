@@ -24,7 +24,7 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from queue import Empty
+from queue import Empty, Queue as SimpleQueue
 import numpy as np
 import logging
 from multiprocessing import Queue
@@ -42,7 +42,6 @@ import concurrent.futures
 from tritonclient.utils import InferenceServerException, triton_to_np_dtype
 from argparse import Namespace
 from enum import Enum
-from google.protobuf import text_format, message
 
 import nvtx
 
@@ -72,8 +71,9 @@ class ImageClient():
         self.gpu_id = flags.gpu_id
         self.flags = flags
 
-        self.sent_cnt = 0
-        self.recv_cnt = 0
+        # Number of surfaces taken and number of responses received
+        self.num_surf = 0
+        self.num_resp = 0
 
         # Create triton client, parse model metadata and config
         self.triton_client = grpcclient.InferenceServerClient(
@@ -115,6 +115,10 @@ class ImageClient():
         # Async stuff
         self.tasks = set()
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+        # Results
+        self.results = SimpleQueue()
+        self.all_done = False
 
     def _get_shape(self) -> tuple:
         """
@@ -236,20 +240,33 @@ class ImageClient():
         return (inputs, outputs)
 
     @nvtx.annotate()
-    def _process(self, results):
+    def _process(self, results) -> None:
         """
         Process inference result and put it into stdout.
 
         Args:
             results (_type_): Inference result returned by Triton sever
 
-        Raises:
-            Exception: if batching is on and result rize doesn't match batch size
         """
+        res = {}
         for name in self.output_names:
-            result = results.as_numpy(name)
-            print(f"{name}: {result}")
-        print(f"----")
+            res[name] = results.as_numpy(name)
+
+        self.results.put(res)
+
+    @nvtx.annotate()
+    def _signal_end(self) -> None:
+        """
+        Put sentinel message into results queue.
+        It signals that no more tasks will be submitted.
+        """
+
+        def _impl(results: SimpleQueue) -> None:
+            results.put(None)
+
+        future = self.executor.submit(_impl, self.results)
+        self.tasks.add(future)
+        future.add_done_callback(self.tasks.remove)
 
     @nvtx.annotate()
     def _send(self, img: list[np.ndarray]) -> None:
@@ -271,11 +288,11 @@ class ImageClient():
                 inputs,
                 self.flags.model_version,
                 outputs,
-                str(self.sent_cnt)
+                str(self.num_surf)
             )
 
             self._process(response)
-            self.sent_cnt += 1
+            self.num_resp += 1
 
         except InferenceServerException as e:
             LOGGER.error("Failed to send inference request: " + str(e))
@@ -307,11 +324,13 @@ class ImageClient():
             # Decode Surface
             surf_src = self.dec.decode()
             if surf_src is None:
+                self._signal_end()
                 return False
 
             # Process to match NN expectations
             surf_dst = self.conv.convert(surf_src)
             if surf_dst is None:
+                self._signal_end()
                 return False
 
             # Download to RAM
@@ -321,6 +340,7 @@ class ImageClient():
             success, info = self.dwn.Run(surf_dst, img)
             if not success:
                 LOGGER.error(f"Failed to download surface: {info}")
+                self._signal_end()
                 return False
 
             # Create inference request task
@@ -328,17 +348,33 @@ class ImageClient():
             self.tasks.add(future)
             future.add_done_callback(self.tasks.remove)
 
+            # Increase surfaces counter
+            self.num_surf += 1
+
         except Exception as e:
             LOGGER.error(
-                f"Frame {self.sent_cnt}. Unexpected excepton: {str(e)}")
+                f"Frame {self.num_surf}. Unexpected excepton: {str(e)}")
+            self._signal_end()
             return False
 
         return True
 
-    def complete_requests(self) -> None:
+    def get_response(self) -> dict:
         """
-        Won't return unless task set is empty.
-        """
+        Get single inference response.
 
-        while len(self.tasks):
-            time.sleep(0.001)
+        Returns:
+            dict: dictionary with binary response data. Once None is returned it
+            means all responses are taken from sever. All consequent calls will
+            return None as well.
+        """
+        while not self.all_done:
+            try:
+                res = self.results.get_nowait()
+                if not res:
+                    self.all_done = True
+                return res
+            except Empty:
+                continue
+
+        return None

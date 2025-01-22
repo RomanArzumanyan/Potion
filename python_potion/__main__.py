@@ -58,7 +58,18 @@ def main(flags: argparse.Namespace) -> None:
         # Client will signal buf_proc to stop after timeout
         while client.send_request(buf_stop, start_time):
             pass
-        client.complete_requests()
+
+        # 2.3
+        # Get inference repsonse
+        # Once None is received, it means processing is done
+        done = False
+        while not done:
+            res = client.get_response()
+            if not res:
+                done = True
+                break
+
+            print(res)
 
     except Exception as e:
         all_good = False

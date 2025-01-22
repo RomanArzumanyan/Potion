@@ -163,4 +163,12 @@ def get_parser() -> argparse.ArgumentParser:
         default=1,
         help="Number of class results to report. Default is 1.",
     )
+    parser.add_argument(
+        "-buf_queue_size",
+        "--buf_queue_size",
+        type=int,
+        required=False,
+        default=1024,
+        help="Buffer queue size in chunks. Default is 1024.",
+    )
     return parser

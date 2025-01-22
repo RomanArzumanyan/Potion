@@ -300,7 +300,7 @@ class ImageClient():
             LOGGER.error("Failed to send inference request: " + str(e))
 
     @nvtx.annotate()
-    def send_request(self, buf_stop: SyncEvent, start_time: float) -> tuple[bool, bool]:
+    def send_request(self, buf_stop: SyncEvent, start_time: float) -> bool:
         """
         Submit single inference request.
         If :arg:`buf_stop` is None, requests will be sent until there are decoded frames.
@@ -362,22 +362,25 @@ class ImageClient():
 
         return True
 
-    def get_response(self) -> dict:
+    @nvtx.annotate()
+    def get_response(self) -> tuple[bool, dict]:
         """
-        Get single inference response.
+        Get inference response
 
         Returns:
-            dict: dictionary with binary response data. Once None is returned it
-            means all responses are taken from sever. All consequent calls will
-            return None as well.
+            tuple[bool, dict]:
+                First element is True if there are more responses from server available, False otherwise
+                Second element is dict with results, may be None if no responses are ready yet.
         """
-        while not self.all_done:
+
+        res = None
+
+        if not self.all_done:
             try:
                 res = self.results.get_nowait()
                 if not res:
                     self.all_done = True
-                return res
             except Empty:
-                continue
+                pass
 
-        return None
+        return (not self.all_done, res)

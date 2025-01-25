@@ -15,6 +15,41 @@ from multiprocessing import Queue, Process
 from queue import Empty
 
 
+def find_shortest_path(graph: dict, start, goal) -> list:
+    """
+    Find shortest path in graph
+
+    Args:
+        graph (dict): graph
+        start: start point
+        goal : end point
+
+    Returns:
+        list: list where every item is a node. Empty if no path exists
+    """
+    explored = []
+    queue = [[start]]
+
+    if start == goal:
+        return [start]
+
+    while queue:
+        path = queue.pop(0)
+        node = path[-1]
+
+        if node not in explored:
+            neighbours = graph[node]
+            for neighbour in neighbours:
+                new_path = list(path)
+                new_path.append(neighbour)
+                queue.append(new_path)
+                if neighbour == goal:
+                    return new_path
+            explored.append(node)
+
+    return []
+
+
 def drain(q: Queue) -> int:
     """
     Drain queue. Will not return unless :arg:`q` is empty.
@@ -127,5 +162,13 @@ def get_parser() -> argparse.ArgumentParser:
         required=False,
         default=1,
         help="Number of class results to report. Default is 1.",
+    )
+    parser.add_argument(
+        "-buf_queue_size",
+        "--buf_queue_size",
+        type=int,
+        required=False,
+        default=1024,
+        help="Buffer queue size in chunks. Default is 1024.",
     )
     return parser

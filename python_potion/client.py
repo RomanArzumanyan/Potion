@@ -24,7 +24,7 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from queue import Empty
+from queue import Empty, Queue as SimpleQueue
 import numpy as np
 import logging
 from multiprocessing import Queue
@@ -37,6 +37,7 @@ import python_potion.decoder as decoder
 import python_potion.converter as converter
 import python_vali as vali
 import time
+import struct
 import concurrent.futures
 
 from tritonclient.utils import InferenceServerException, triton_to_np_dtype
@@ -71,8 +72,9 @@ class ImageClient():
         self.gpu_id = flags.gpu_id
         self.flags = flags
 
-        self.sent_cnt = 0
-        self.recv_cnt = 0
+        # Number of surfaces taken and number of responses received
+        self.num_surf = 0
+        self.num_resp = 0
 
         # Create triton client, parse model metadata and config
         self.triton_client = grpcclient.InferenceServerClient(
@@ -95,14 +97,15 @@ class ImageClient():
 
         params = {
             "src_fmt": self.dec.format(),
-            "dst_fmt": vali.PixelFormat.RGB_32F_PLANAR,
+            "dst_fmt": self._get_pix_fmt(),
             "src_w": self.dec.width(),
             "src_h": self.dec.height(),
             "dst_w": self.w,
             "dst_h": self.h
         }
 
-        self.conv = converter.Converter(params, self.flags)
+        self.conv = converter.Converter(
+            params, self.flags, self.dec.cuda_stream())
 
         # Deal with batch size etc.
         self.batch_size = self.flags.batch_size
@@ -114,21 +117,60 @@ class ImageClient():
         self.tasks = set()
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
+        # Results
+        self.results = SimpleQueue()
+        self.all_done = False
+
+    def _get_shape(self) -> tuple:
+        """
+        Get target tensor shape
+
+        Raises:
+            RuntimeError: if format isn't supported
+
+        Returns:
+            tuple: tuple with shape
+        """
+        if self.format == mc.ModelInput.FORMAT_NCHW:
+            return (self.c, self.h, self.w)
+        elif self.format == mc.ModelInput.FORMAT_NHWC:
+            return (self.h, self.w, self.c)
+        else:
+            raise RuntimeError(f"Unsupported shape")
+
+    def _get_pix_fmt(self) -> vali.PixelFormat:
+        """
+        Get target pixel format from model metadata
+
+        Raises:
+            ValueError: if data type or format is not supported
+
+        Returns:
+            vali.PixelFormat: target pixel format
+        """
+        supp_types = ["UINT8", "FP32"]
+        if not self.dtype in supp_types:
+            raise ValueError(
+                f"Unsupported datatype {self.dtype}. Not in {supp_types}")
+
+        supp_fmts = [mc.ModelInput.FORMAT_NHWC, mc.ModelInput.FORMAT_NCHW]
+        if not self.format in supp_fmts:
+            raise ValueError(
+                f"Unsupported format {self.format}. Not in {supp_fmts}")
+
+        if self.dtype == "UINT8":
+            return vali.PixelFormat.RGB if self.format == mc.ModelInput.FORMAT_NHWC else vali.PixelFormat.RGB_PLANAR
+        else:
+            return vali.PixelFormat.RGB_32F if self.format == mc.ModelInput.FORMAT_NHWC else vali.PixelFormat.RGB_32F_PLANAR
+
     def _parse_model(self) -> None:
         """
-        Check the configuration of a model to make sure it meets the
-        requirements for an image classification network (as expected by
-        this client)
+        Parse model metadata
         """
+        # Only single input models are supported
         if len(self.model_metadata.inputs) != 1:
             raise Exception("expecting 1 input, got {}".format(
                 len(self.model_metadata.inputs)))
-
-        if len(self.model_metadata.outputs) != 1:
-            raise Exception(
-                "expecting 1 output, got {}".format(
-                    len(self.model_metadata.outputs))
-            )
 
         if len(self.model_config.input) != 1:
             raise Exception(
@@ -139,32 +181,8 @@ class ImageClient():
 
         input_metadata = self.model_metadata.inputs[0]
         input_config = self.model_config.input[0]
-        output_metadata = self.model_metadata.outputs[0]
 
-        if output_metadata.datatype != "FP32":
-            raise Exception(
-                "expecting output datatype to be FP32, model '"
-                + self.model_metadata.name
-                + "' output type is "
-                + output_metadata.datatype
-            )
-
-        # Output is expected to be a vector. But allow any number of
-        # dimensions as long as all but 1 is size 1 (e.g. { 10 }, { 1, 10
-        # }, { 10, 1, 1 } are all ok). Ignore the batch dimension if there
-        # is one.
-        output_batch_dim = self.model_config.max_batch_size > 0
-        non_one_cnt = 0
-        for dim in output_metadata.shape:
-            if output_batch_dim:
-                output_batch_dim = False
-            elif dim > 1:
-                non_one_cnt += 1
-                if non_one_cnt > 1:
-                    raise Exception("expecting model output to be a vector")
-
-        # Model input must have 3 dims, either CHW or HWC (not counting
-        # the batch dimension), either CHW or HWC
+        # Input must be picture-alike object of NHWC or NCHW layout
         input_batch_dim = self.model_config.max_batch_size > 0
         expected_input_dims = 3 + (1 if input_batch_dim else 0)
         if len(input_metadata.shape) != expected_input_dims:
@@ -179,29 +197,22 @@ class ImageClient():
             FORMAT_ENUM_TO_INT = dict(mc.ModelInput.Format.items())
             input_config.format = FORMAT_ENUM_TO_INT[input_config.format]
 
-        if (input_config.format != mc.ModelInput.FORMAT_NCHW) and (
-            input_config.format != mc.ModelInput.FORMAT_NHWC
-        ):
-            raise Exception(
-                "unexpected input format "
-                + mc.ModelInput.Format.Name(input_config.format)
-                + ", expecting "
-                + mc.ModelInput.Format.Name(mc.ModelInput.FORMAT_NCHW)
-                + " or "
-                + mc.ModelInput.Format.Name(mc.ModelInput.FORMAT_NHWC)
-            )
-
         if input_config.format == mc.ModelInput.FORMAT_NHWC:
             self.h = input_metadata.shape[1 if input_batch_dim else 0]
             self.w = input_metadata.shape[2 if input_batch_dim else 1]
             self.c = input_metadata.shape[3 if input_batch_dim else 2]
-        else:
+        elif input_config.format == mc.ModelInput.FORMAT_NCHW:
             self.c = input_metadata.shape[1 if input_batch_dim else 0]
             self.h = input_metadata.shape[2 if input_batch_dim else 1]
             self.w = input_metadata.shape[3 if input_batch_dim else 2]
+        else:
+            raise Exception(f"Unexpected input format")
+
+        self.output_names = []
+        for output_metadata in self.model_metadata.outputs:
+            self.output_names.append(output_metadata.name)
 
         self.max_batch_size = self.model_config.max_batch_size
-        self.output_name = output_metadata.name
         self.input_name = input_metadata.name
         self.dtype = input_metadata.datatype
         self.format = input_config.format
@@ -222,38 +233,45 @@ class ImageClient():
 
         inputs[0].set_data_from_numpy(batched_image_data)
 
-        outputs = [grpcclient.InferRequestedOutput(
-            self.output_name, class_count=self.flags.classes)]
+        outputs = []
+        for name in self.output_names:
+            outputs.append(grpcclient.InferRequestedOutput(
+                name, self.flags.classes))
 
         return (inputs, outputs)
 
     @nvtx.annotate()
-    def _process(self, results):
+    def _process(self, results, request_id) -> None:
         """
         Process inference result and put it into stdout.
 
         Args:
             results (_type_): Inference result returned by Triton sever
 
-        Raises:
-            Exception: if batching is on and result rize doesn't match batch size
         """
-
-        output_array = results.as_numpy(self.output_name)
-        assert len(output_array) == self.batch_size
-
-        for results in output_array:
-            if not self.supports_batching:
-                results = [results]
-            for result in results:
-                if output_array.dtype.type == np.object_:
-                    cls = "".join(chr(x) for x in result).split(":")
-                else:
-                    cls = result.split(":")
-                print("    {} ({}) = {}".format(cls[0], cls[1], cls[2]))
+        obj = {}
+        res = {request_id: obj}
+        for name in self.output_names:
+            obj[name] = results.as_numpy(name)
+            res[request_id] = obj
+            self.results.put(res)
 
     @nvtx.annotate()
-    def _send(self, img: list[np.ndarray]) -> None:
+    def _signal_end(self) -> None:
+        """
+        Put sentinel message into results queue.
+        It signals that no more tasks will be submitted.
+        """
+
+        def _impl(results: SimpleQueue) -> None:
+            results.put(None)
+
+        future = self.executor.submit(_impl, self.results)
+        self.tasks.add(future)
+        future.add_done_callback(self.tasks.remove)
+
+    @nvtx.annotate()
+    def _send(self, img: list[np.ndarray], request_id: str) -> None:
         """
         Send inference request, get response and write to stdout
 
@@ -272,17 +290,17 @@ class ImageClient():
                 inputs,
                 self.flags.model_version,
                 outputs,
-                str(self.sent_cnt)
+                request_id
             )
 
-            self._process(response)
-            self.sent_cnt += 1
+            self._process(response, request_id)
+            self.num_resp += 1
 
         except InferenceServerException as e:
             LOGGER.error("Failed to send inference request: " + str(e))
 
     @nvtx.annotate()
-    def send_request(self, buf_stop: SyncEvent, start_time: float) -> tuple[bool, bool]:
+    def send_request(self, buf_stop: SyncEvent, start_time: float) -> bool:
         """
         Submit single inference request.
         If :arg:`buf_stop` is None, requests will be sent until there are decoded frames.
@@ -308,38 +326,60 @@ class ImageClient():
             # Decode Surface
             surf_src = self.dec.decode()
             if surf_src is None:
+                self._signal_end()
                 return False
 
             # Process to match NN expectations
             surf_dst = self.conv.convert(surf_src)
             if surf_dst is None:
+                self._signal_end()
                 return False
 
             # Download to RAM
             # Acts as sync point on previous async GPU operations
-            img = np.ndarray(shape=(self.c, self.h, self.w),
+            img = np.ndarray(shape=self._get_shape(),
                              dtype=triton_to_np_dtype(self.dtype))
             success, info = self.dwn.Run(surf_dst, img)
             if not success:
                 LOGGER.error(f"Failed to download surface: {info}")
+                self._signal_end()
                 return False
 
             # Create inference request task
-            future = self.executor.submit(self._send, [img])
+            future = self.executor.submit(
+                self._send, [img.copy()], str(self.num_surf))
             self.tasks.add(future)
             future.add_done_callback(self.tasks.remove)
 
+            # Increase surfaces counter
+            self.num_surf += 1
+
         except Exception as e:
             LOGGER.error(
-                f"Frame {self.sent_cnt}. Unexpected excepton: {str(e)}")
+                f"Frame {self.num_surf}. Unexpected excepton: {str(e)}")
+            self._signal_end()
             return False
 
         return True
 
-    def complete_requests(self) -> None:
+    def get_response(self) -> tuple[bool, dict]:
         """
-        Won't return unless task set is empty.
+        Get inference response
+
+        Returns:
+            tuple[bool, dict]:
+                First element is True if there are more responses from server available, False otherwise
+                Second element is dict with results, may be None if no responses are ready yet.
         """
 
-        while len(self.tasks):
-            time.sleep(0.001)
+        res = None
+
+        if not self.all_done:
+            try:
+                res = self.results.get_nowait()
+                if not res:
+                    self.all_done = True
+            except Empty:
+                pass
+
+        return (not self.all_done, res)

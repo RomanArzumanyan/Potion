@@ -110,6 +110,15 @@ class Decoder:
             self.dec_frame = np.ndarray(shape=(self.py_dec.HostFrameSize),
                                         dtype=np.uint8)
 
+    def cuda_stream(self) -> int:
+        """
+        Get CUDA stream used by decoder
+
+        Returns:
+            int: raw CUDA stream handle
+        """
+        return self.py_dec.Stream
+
     def width(self) -> int:
         """
         Get video width.
@@ -149,8 +158,8 @@ class Decoder:
         try:
             pkt_data = vali.PacketData()
             if self.py_dec.IsAccelerated:
-                success, info = self.py_dec.DecodeSingleSurface(
-                    self.surf, pkt_data)
+                success, info = self.py_dec.DecodeSingleSurfaceAsync(
+                    surf=self.surf, record_event=False, pkt_data=pkt_data)
 
                 if info == vali.TaskExecInfo.END_OF_STREAM:
                     return None

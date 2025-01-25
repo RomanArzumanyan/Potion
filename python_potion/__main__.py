@@ -29,7 +29,7 @@ def main(flags: argparse.Namespace) -> None:
     # Queue with video track chunks has variable size.
     # It serves as temporary storage to prevent data loss if consumer is slow.
     buf_class = buffering.StreamBuffer(flags)
-    buf_queue = Queue(maxsize=0)
+    buf_queue = Queue(maxsize=flags.buf_queue_size)
 
     # 1.2
     # This process reads video track and puts chunks into variable size queue.
@@ -41,36 +41,33 @@ def main(flags: argparse.Namespace) -> None:
     buf_proc.start()
 
     # 1.3
-    # Start wallclock time
+    # Start wallclock time.
     start_time = time.time()
 
-    try:
-        # Emergency stop flag.
-        all_good = True
+    # 2.1
+    # Start inference in current process.
+    # It will take input from queue, decode and send images to triton inference server.
+    client = image_client.ImageClient(flags, buf_queue)
 
-        # 2.1
-        # Start inference in current process.
-        # It will take input from queue, decode and send images to triton inference server.
-        client = image_client.ImageClient(flags, buf_queue)
+    # 2.2
+    # Send inference requests and get response if there are any.
+    # Client will signal buf_proc to stop after timeout.
+    counter = 2
+    while counter > 0:
+        # Decoder will run out of frames first.
+        if counter > 1:
+            counter -= not client.send_request(buf_stop, start_time)
 
-        # 2.2
-        # Send inference requests
-        # Client will signal buf_proc to stop after timeout
-        while client.send_request(buf_stop, start_time):
-            pass
-        client.complete_requests()
+        # Then we drain responses from server.
+        if counter > 0:
+            more_to_come, res = client.get_response()
+            if res:
+                print(res)
+            counter -= not more_to_come
 
-    except Exception as e:
-        all_good = False
-        buf_stop.set()
-        LOGGER.fatal(str(e))
-
-    finally:
-        # 3.1
-        # Stop buf_stream process.
-        if not all_good:
-            common.drain(buf_queue)
-        buf_proc.join()
+    # 3.1
+    # Join buffering process.
+    buf_proc.join()
 
 
 if __name__ == "__main__":

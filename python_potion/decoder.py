@@ -147,14 +147,16 @@ class Decoder:
         return self.py_dec.Format
 
     @nvtx.annotate()
-    def decode(self) -> vali.Surface:
+    def decode(self, dry_run=False) -> vali.Surface:
         """
         Decode single video frame. When decoding is done, will return None.
+
+        Args:
+            dry_run (bool, optional): if True, CPU decoder won't upload Surface. Defaults to False.
 
         Returns:
             vali.Surface: Surface with reconstructed pixels.
         """
-
         try:
             pkt_data = vali.PacketData()
             if self.py_dec.IsAccelerated:
@@ -174,10 +176,12 @@ class Decoder:
                     LOGGER.error(f"Failed to decode frame: {info}")
                     return None
 
-                success, info = self.uploader.Run(self.dec_frame, self.surf)
-                if not success:
-                    LOGGER.error(f"Failed to upload frame: {info}")
-                    return None
+                if not dry_run:
+                    success, info = self.uploader.Run(
+                        self.dec_frame, self.surf)
+                    if not success:
+                        LOGGER.error(f"Failed to upload frame: {info}")
+                        return None
 
             return self.surf
 

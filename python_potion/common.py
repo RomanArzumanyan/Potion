@@ -76,6 +76,21 @@ def drain(q: Queue) -> int:
     return size
 
 
+def get_dec_bench_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        "This benchmark measures pure decoding speed \n"
+    )
+    parser.add_argument(
+        "-j",
+        "--decode_benchmark",
+        type=bool,
+        required=False,
+        default=False,
+        help="run decode performance benchmark",
+    )
+    return parser
+
+
 def get_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         "This utility decodes input video, runs inference on it and prints out resuts. \n"
@@ -86,7 +101,7 @@ def get_parser() -> argparse.ArgumentParser:
         "--gpu-id",
         type=int,
         required=True,
-        choices=range(0, 99),
+        choices=range(-1, 99),
         help="GPU id, check nvidia-smi",
     )
     parser.add_argument(
@@ -129,7 +144,7 @@ def get_parser() -> argparse.ArgumentParser:
         help="Enable verbose output, turned off by default",
     )
     parser.add_argument(
-        "-m", "--model-name", type=str, required=True, help="Name of model"
+        "-m", "--model-name", type=str, required=False, help="Name of model"
     )
     parser.add_argument(
         "-x",

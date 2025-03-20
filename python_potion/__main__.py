@@ -19,9 +19,18 @@ import argparse
 import python_potion.common as common
 import python_potion.buffering as buffering
 import python_potion.client as image_client
+import python_potion.decode_benchmark as dec_benchmark
 import time
 
 LOGGER = logging.getLogger(__file__)
+
+
+def run_decode_benchmark(flags: argparse.Namespace) -> None:
+    # Nothing fancy here, just run multiple processes with decoder threads.
+    benchmark = dec_benchmark.DecodeBenchmark(flags)
+
+    # Run it, output URL, number of threads and decoding time.
+    benchmark.run()
 
 
 def main(flags: argparse.Namespace) -> None:
@@ -71,9 +80,18 @@ def main(flags: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
+    mp.set_start_method('spawn')
     logging.basicConfig(level=logging.ERROR)
 
     try:
-        main(common.get_parser().parse_args())
+        bench_flags, _ = common.get_dec_bench_parser().parse_known_args()
+        common_flags, _ = common.get_parser().parse_known_args()
+
+        if bench_flags.decode_benchmark:
+            # Append benchmark-specific CLI options to common options to keep
+            # stuff in single namespace.
+            run_decode_benchmark(common_flags)
+        else:
+            main(common_flags)
     except Exception as e:
         LOGGER.fatal(str(e))

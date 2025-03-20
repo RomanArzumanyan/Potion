@@ -80,17 +80,17 @@ def main(flags: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
+    mp.set_start_method('spawn')
     logging.basicConfig(level=logging.ERROR)
 
     try:
-        bench_flags = common.get_dec_bench_parser().parse_args()
-        common_flags = common.get_parser().parse_args()
+        bench_flags, _ = common.get_dec_bench_parser().parse_known_args()
+        common_flags, _ = common.get_parser().parse_known_args()
 
-        if bench_flags.num_procs > 0:
+        if bench_flags.decode_benchmark:
             # Append benchmark-specific CLI options to common options to keep
             # stuff in single namespace.
-            run_decode_benchmark(argparse.Namespace(
-                **vars(bench_flags), **vars(common_flags)))
+            run_decode_benchmark(common_flags)
         else:
             main(common_flags)
     except Exception as e:

@@ -18,6 +18,7 @@ import os
 import concurrent.futures
 import logging
 
+from queue import Empty
 from multiprocessing import Queue, Process
 
 
@@ -25,61 +26,66 @@ LOGGER = logging.getLogger(__file__)
 
 
 class DecodeBenchmark:
+    """
+    Decoding performance benchmark.
+    Takes path to file with list of videos.
+    Every video will be decoded in separate thread.
+    After all videos are decoded, will output short stat to stdout.
+    """
+
     def __init__(self, flags: Namespace):
         self.flags = flags
         self.gpu_id = flags.gpu_id
-        self.num_procs = flags.num_procs
 
         with open(flags.input) as inp_file:
-            if not os.path.isfile(inp_file):
-                raise Exception(f"{inp_file} is not a file")
+            if not os.path.isfile(flags.input):
+                raise Exception(f"{flags.input} is not a file")
             self.input_files = [line.rstrip() for line in inp_file]
 
+        self.res_size = len(self.input_files)
+        self.results = Queue(maxsize=self.res_size)
+
     def run(self) -> None:
-        try:
-            tasks = set()
-            executor = concurrent.futures.ProcessPoolExecutor(
-                max_workers=self.num_procs)
+        """
+        Run multiple decoding threads.
+        Wait until done, output short statistics to stdout.
+        """
 
-            for _ in range(0, self.num_procs):
-                results = []
-                future = executor.submit(self._spawn_threads, results)
-                tasks.add(future)
-                future.add_done_callback(tasks.remove)
-
-            while len(tasks):
-                time.sleep(1)
-
-            if len(results) != len(self.input_files):
-                LOGGER.error(f"Not all input files were processed")
-
-            for i in range(0, len(results)):
-                num_frames = results[i][0]
-                run_time = results[i][1]
-                print(
-                    f"{self.input_files[i]} : {num_frames} frames in {run_time} s.")
-
-        except Exception as e:
-            LOGGER.fatal(str(e))
-
-    def _spawn_threads(self, results: list) -> None:
         try:
             tasks = set()
             executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=len(self.input_files))
 
             for input in self.input_files:
-                future = executor.submit(self._decode_func, input, results)
+                future = executor.submit(self._decode_func, input)
                 tasks.add(future)
                 future.add_done_callback(tasks.remove)
 
             while len(tasks):
                 time.sleep(1)
 
+            while True:
+                try:
+                    result = self.results.get_nowait()
+                    url = result[0]
+                    cnt = result[1]
+                    fps = cnt / result[2]
+                    print(f"url: {url}, frames: {cnt}, fps: {fps}")
+                except Empty:
+                    break
+
         except Exception as e:
             LOGGER.fatal(str(e))
 
-    def _decode_func(self, input: str, results: list) -> None:
+    def _decode_func(self, input: str) -> None:
+        """
+        Decode single video.
+        To be run in separate thread.
+
+        Args:
+            input (str): input video URL.
+        """
+
         try:
             dec_frames = 0
             start = time.time()
@@ -99,13 +105,13 @@ class DecodeBenchmark:
 
             dec = decoder.Decoder(buf_queue, self.flags)
             while True:
-                surf = dec.decode()
+                surf = dec.decode(dry_run=True)
                 if not surf:
                     break
                 dec_frames += 1
 
             buf_proc.join()
-            results.append((dec_frames, time.time() - start))
+            self.results.put((input, dec_frames, time.time() - start))
 
         except Exception as e:
             LOGGER.fatal(str(e))

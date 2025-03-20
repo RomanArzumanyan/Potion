@@ -100,15 +100,21 @@ class Decoder:
             # Failure to create SW decoder is fatal.
             self.py_dec = vali.PyDecoder(self.adapter, {}, gpu_id=-1)
 
-        self.surf = vali.Surface.Make(
-            self.py_dec.Format, self.py_dec.Width, self.py_dec.Height, flags.gpu_id)
-
-        # SW decoder outputs to numpy array.
-        # Have to initialize uploader to keep decoded frames always in vRAM.
         if not self.py_dec.IsAccelerated:
-            self.uploader = vali.PyFrameUploader(flags.gpu_id)
+            # SW decoder outputs to numpy array.
+            # Have to initialize uploader to keep decoded frames always in vRAM.
+            self.uploader = vali.PyFrameUploader(gpu_id=0)
+
             self.dec_frame = np.ndarray(shape=(self.py_dec.HostFrameSize),
                                         dtype=np.uint8)
+
+        # If decoder runs on CPU, allocate Surface on GPU #0
+        # Otherwise use the actual GPU ID.
+        self.surf = vali.Surface.Make(
+            self.py_dec.Format,
+            self.py_dec.Width,
+            self.py_dec.Height,
+            max(flags.gpu_id, 0))
 
     def cuda_stream(self) -> int:
         """
@@ -146,6 +152,15 @@ class Decoder:
         """
         return self.py_dec.Format
 
+    def framerate(self) -> float:
+        """
+        Get video frame rate
+
+        Returns:
+            float: FPS
+        """
+        return self.py_dec.Framerate
+
     @nvtx.annotate()
     def decode(self, dry_run=False) -> vali.Surface:
         """
@@ -160,7 +175,7 @@ class Decoder:
         try:
             pkt_data = vali.PacketData()
             if self.py_dec.IsAccelerated:
-                success, info = self.py_dec.DecodeSingleSurfaceAsync(
+                success, info, _ = self.py_dec.DecodeSingleSurfaceAsync(
                     surf=self.surf, record_event=False, pkt_data=pkt_data)
 
                 if info == vali.TaskExecInfo.END_OF_STREAM:
@@ -172,6 +187,10 @@ class Decoder:
             else:
                 success, info = self.py_dec.DecodeSingleFrame(
                     self.dec_frame, pkt_data)
+
+                if info == vali.TaskExecInfo.END_OF_STREAM:
+                    return None
+
                 if not success:
                     LOGGER.error(f"Failed to decode frame: {info}")
                     return None

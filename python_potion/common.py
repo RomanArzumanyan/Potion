@@ -81,13 +81,12 @@ def get_dec_bench_parser() -> argparse.ArgumentParser:
         "This benchmark measures pure decoding speed \n"
     )
     parser.add_argument(
-        "-p",
-        "--num_procs",
-        type=int,
-        required=True,
-        choices=range(0, 99),
-        default=0,
-        help="number of decoding processes",
+        "-j",
+        "--decode_benchmark",
+        type=bool,
+        required=False,
+        default=False,
+        help="run decode performance benchmark",
     )
     return parser
 
@@ -145,7 +144,7 @@ def get_parser() -> argparse.ArgumentParser:
         help="Enable verbose output, turned off by default",
     )
     parser.add_argument(
-        "-m", "--model-name", type=str, required=True, help="Name of model"
+        "-m", "--model-name", type=str, required=False, help="Name of model"
     )
     parser.add_argument(
         "-x",

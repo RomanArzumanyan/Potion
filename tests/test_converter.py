@@ -53,12 +53,11 @@ class TestConverter(unittest.TestCase):
         params = {
             "src_fmt": dec.format(),
             "dst_fmt": vali.PixelFormat.RGB_32F_PLANAR,
-            "src_w": dec.width(),
-            "src_h": dec.height(),
-            "dst_w": 224,
-            "dst_h": 224
+            "dst_w": 640,
+            "dst_h": 360
         }
-        cvt = converter.Converter(params, self.flags)
+        cvt = converter.Converter(
+            params, self.flags, gpu_id=0, cuda_stream=dec.cuda_stream())
 
         while True:
             surf_src = dec.decode()
@@ -74,3 +73,7 @@ class TestConverter(unittest.TestCase):
             self.assertEqual(surf_dst.Format, params["dst_fmt"])
 
         buf_proc.join()
+
+
+if __name__ == "__main__":
+    unittest.main()

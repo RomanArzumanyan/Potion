@@ -76,3 +76,6 @@ class TestDecoder(unittest.TestCase):
 
         self.assertEqual(dec_cnt, self.gt["num_frames"])
         buf_proc.join()
+
+if __name__ == "__main__":
+    unittest.main()

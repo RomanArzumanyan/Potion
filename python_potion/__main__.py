@@ -18,7 +18,7 @@ import argparse
 
 import python_potion.common as common
 import python_potion.buffering as buffering
-import python_potion.client as image_client
+import python_potion.client as inference_client
 import python_potion.decode_benchmark as dec_benchmark
 import time
 
@@ -38,7 +38,7 @@ def main(flags: argparse.Namespace) -> None:
     # Queue with video track chunks has variable size.
     # It serves as temporary storage to prevent data loss if consumer is slow.
     buf_class = buffering.StreamBuffer(flags)
-    buf_queue = Queue(maxsize=flags.buf_queue_size)
+    buf_queue = mp.Queue(maxsize=0)
 
     # 1.2
     # This process reads video track and puts chunks into variable size queue.
@@ -56,20 +56,20 @@ def main(flags: argparse.Namespace) -> None:
     # 2.1
     # Start inference in current process.
     # It will take input from queue, decode and send images to triton inference server.
-    client = image_client.ImageClient(flags, buf_queue)
+    client = inference_client.InferenceClient(flags, buf_queue)
 
     # 2.2
-    # Send inference requests and get response if there are any.
+    # Run inference and get response if there are any.
     # Client will signal buf_proc to stop after timeout.
     counter = 2
     while counter > 0:
         # Decoder will run out of frames first.
         if counter > 1:
-            counter -= not client.send_request(buf_stop, start_time)
+            counter -= not client.push_frame(buf_stop, start_time)
 
-        # Then we drain responses from server.
+        # Then we drain results.
         if counter > 0:
-            more_to_come, res = client.get_response()
+            more_to_come, res = client.get_result()
             if res:
                 print(res)
             counter -= not more_to_come

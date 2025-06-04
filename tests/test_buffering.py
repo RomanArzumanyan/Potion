@@ -147,3 +147,7 @@ class TestOnLocalStream(unittest.TestCase):
         buf_stop.set()
         common.drain(buf_queue)
         buf_proc.join()
+
+
+if __name__ == "__main__":
+    unittest.main()

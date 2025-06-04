@@ -25,25 +25,22 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 from queue import Empty, Queue as SimpleQueue
-import numpy as np
+
 import logging
 from multiprocessing import Queue
 from multiprocessing.synchronize import Event as SyncEvent
 
-import numpy as np
-import tritonclient.grpc as grpcclient
-import tritonclient.grpc.model_config_pb2 as mc
 import python_potion.decoder as decoder
 import python_potion.converter as converter
 import python_vali as vali
 import time
-import struct
 import concurrent.futures
 
-from tritonclient.utils import InferenceServerException, triton_to_np_dtype
 from argparse import Namespace
 from enum import Enum
-
+from ultralytics import YOLO
+import torch
+import json
 import nvtx
 
 
@@ -56,7 +53,7 @@ class ClientState(Enum):
     ERROR = 2
 
 
-class ImageClient():
+class InferenceClient():
     def __init__(self, flags: Namespace, inp_queue: Queue,):
         """
         Constructor.
@@ -76,40 +73,29 @@ class ImageClient():
         self.num_surf = 0
         self.num_resp = 0
 
-        # Create triton client, parse model metadata and config
-        self.triton_client = grpcclient.InferenceServerClient(
-            url=self.flags.url, verbose=self.flags.verbose
-        )
+        # Width and height expected by NN
+        self.w = 640
+        self.h = 640
 
-        self.model_metadata = self.triton_client.get_model_metadata(
-            model_name=self.flags.model_name, model_version=self.flags.model_version
-        )
-
-        self.model_config = self.triton_client.get_model_config(
-            model_name=self.flags.model_name, model_version=self.flags.model_version
-        ).config
-
-        self._parse_model()
-
-        # Create decoder, converter, downloader
-        self.dwn = vali.PySurfaceDownloader(flags.gpu_id)
+        # Create decoder and converter
         self.dec = decoder.Decoder(inp_queue, self.flags)
+
+        # Use YOLO model for segmentation and tracking
+        self.model = YOLO("yolo11n.pt")
 
         params = {
             "src_fmt": self.dec.format(),
-            "dst_fmt": self._get_pix_fmt(),
-            "src_w": self.dec.width(),
-            "src_h": self.dec.height(),
+            "dst_fmt": vali.PixelFormat.RGB_32F_PLANAR,
             "dst_w": self.w,
-            "dst_h": self.h
+            "dst_h": self.h,
         }
 
         self.conv = converter.Converter(
-            params, self.flags, self.dec.cuda_stream())
+            params, self.flags, self.gpu_id, self.dec.cuda_stream())
 
         # Deal with batch size etc.
         self.batch_size = self.flags.batch_size
-        self.supports_batching = self.max_batch_size > 0
+        self.supports_batching = self.batch_size > 0
         if not self.supports_batching and self.batch_size != 1:
             raise RuntimeError("ERROR: This model doesn't support batching.")
 
@@ -121,140 +107,14 @@ class ImageClient():
         self.results = SimpleQueue()
         self.all_done = False
 
-    def _get_shape(self) -> tuple:
-        """
-        Get target tensor shape
-
-        Raises:
-            RuntimeError: if format isn't supported
-
-        Returns:
-            tuple: tuple with shape
-        """
-        if self.format == mc.ModelInput.FORMAT_NCHW:
-            return (self.c, self.h, self.w)
-        elif self.format == mc.ModelInput.FORMAT_NHWC:
-            return (self.h, self.w, self.c)
-        else:
-            raise RuntimeError(f"Unsupported shape")
-
-    def _get_pix_fmt(self) -> vali.PixelFormat:
-        """
-        Get target pixel format from model metadata
-
-        Raises:
-            ValueError: if data type or format is not supported
-
-        Returns:
-            vali.PixelFormat: target pixel format
-        """
-        supp_types = ["UINT8", "FP32"]
-        if not self.dtype in supp_types:
-            raise ValueError(
-                f"Unsupported datatype {self.dtype}. Not in {supp_types}")
-
-        supp_fmts = [mc.ModelInput.FORMAT_NHWC, mc.ModelInput.FORMAT_NCHW]
-        if not self.format in supp_fmts:
-            raise ValueError(
-                f"Unsupported format {self.format}. Not in {supp_fmts}")
-
-        if self.dtype == "UINT8":
-            return vali.PixelFormat.RGB if self.format == mc.ModelInput.FORMAT_NHWC else vali.PixelFormat.RGB_PLANAR
-        else:
-            return vali.PixelFormat.RGB_32F if self.format == mc.ModelInput.FORMAT_NHWC else vali.PixelFormat.RGB_32F_PLANAR
-
-    def _parse_model(self) -> None:
-        """
-        Parse model metadata
-        """
-        # Only single input models are supported
-        if len(self.model_metadata.inputs) != 1:
-            raise Exception("expecting 1 input, got {}".format(
-                len(self.model_metadata.inputs)))
-
-        if len(self.model_config.input) != 1:
-            raise Exception(
-                "expecting 1 input in model configuration, got {}".format(
-                    len(self.model_config.input)
-                )
-            )
-
-        input_metadata = self.model_metadata.inputs[0]
-        input_config = self.model_config.input[0]
-
-        # Input must be picture-alike object of NHWC or NCHW layout
-        input_batch_dim = self.model_config.max_batch_size > 0
-        expected_input_dims = 3 + (1 if input_batch_dim else 0)
-        if len(input_metadata.shape) != expected_input_dims:
-            raise Exception(
-                "expecting input to have {} dimensions, model '{}' input has {}".format(
-                    expected_input_dims, self.model_metadata.name, len(
-                        input_metadata.shape)
-                )
-            )
-
-        if type(input_config.format) == str:
-            FORMAT_ENUM_TO_INT = dict(mc.ModelInput.Format.items())
-            input_config.format = FORMAT_ENUM_TO_INT[input_config.format]
-
-        if input_config.format == mc.ModelInput.FORMAT_NHWC:
-            self.h = input_metadata.shape[1 if input_batch_dim else 0]
-            self.w = input_metadata.shape[2 if input_batch_dim else 1]
-            self.c = input_metadata.shape[3 if input_batch_dim else 2]
-        elif input_config.format == mc.ModelInput.FORMAT_NCHW:
-            self.c = input_metadata.shape[1 if input_batch_dim else 0]
-            self.h = input_metadata.shape[2 if input_batch_dim else 1]
-            self.w = input_metadata.shape[3 if input_batch_dim else 2]
-        else:
-            raise Exception(f"Unexpected input format")
-
-        self.output_names = []
-        for output_metadata in self.model_metadata.outputs:
-            self.output_names.append(output_metadata.name)
-
-        self.max_batch_size = self.model_config.max_batch_size
-        self.input_name = input_metadata.name
-        self.dtype = input_metadata.datatype
-        self.format = input_config.format
-
-    def _make_req_data(self, batched_image_data):
-        """
-        Prepare inference request data
-
-        Args:
-            batched_image_data : numpy ndarray or list of that
-
-        Returns:
-            tuple with inference inputs and outputs
-        """
-
-        inputs = [grpcclient.InferInput(
-            self.input_name, batched_image_data.shape, self.dtype)]
-
-        inputs[0].set_data_from_numpy(batched_image_data)
-
-        outputs = []
-        for name in self.output_names:
-            outputs.append(grpcclient.InferRequestedOutput(
-                name, self.flags.classes))
-
-        return (inputs, outputs)
-
     @nvtx.annotate()
     def _process(self, results, request_id) -> None:
         """
         Process inference result and put it into stdout.
-
-        Args:
-            results (_type_): Inference result returned by Triton sever
-
         """
-        obj = {}
-        res = {request_id: obj}
-        for name in self.output_names:
-            obj[name] = results.as_numpy(name)
-            res[request_id] = obj
-            self.results.put(res)
+        for detection in results:
+            result = {request_id: detection}
+            self.results.put(result)
 
     @nvtx.annotate()
     def _signal_end(self) -> None:
@@ -271,52 +131,26 @@ class ImageClient():
         future.add_done_callback(self.tasks.remove)
 
     @nvtx.annotate()
-    def _send(self, img: list[np.ndarray], request_id: str) -> None:
+    def _inference(self, surf_inf: list[vali.Surface], request_id: str) -> None:
         """
-        Send inference request, get response and write to stdout
-
-        Args:
-            img (list[np.ndarray]): images to send
+        Run inference, get response
         """
 
-        assert len(img) == self.batch_size
+        assert len(surf_inf) == self.batch_size
 
-        data = np.stack(img, axis=0) if self.supports_batching else img[0]
         try:
-            inputs, outputs = self._make_req_data(data)
+            img = torch.from_dlpack(surf_inf[0]).clamp(
+                0.0, 1.0).clone().detach().reshape([1, 3, self.h, self.w])
 
-            response = self.triton_client.infer(
-                self.flags.model_name,
-                inputs,
-                self.flags.model_version,
-                outputs,
-                request_id
-            )
-
-            self._process(response, request_id)
+            results = self.model.track(img, persist=True, verbose=False)
+            self._process(json.loads(results[0].to_json()), request_id)
             self.num_resp += 1
 
-        except InferenceServerException as e:
-            LOGGER.error("Failed to send inference request: " + str(e))
+        except Exception as e:
+            LOGGER.error("Failed to run inference: " + str(e))
 
     @nvtx.annotate()
-    def send_request(self, buf_stop: SyncEvent, start_time: float) -> bool:
-        """
-        Submit single inference request.
-        If :arg:`buf_stop` is None, requests will be sent until there are decoded frames.
-        Otherwise :arg:`buf_stop` shall not be `None` and :arg:`start_time` shall be positive.
-        If :arg:`buf_stop`: is not None but :arg:`start_time` is negative, it will be ignored.
-        In that case, request will be submitted until timeout is reached.
-        After that :arg:`buf_stop` will be set.
-
-        Args:
-            buf_stop (SyncEvent, optional): sync event to set up. Defaults to None (process all frames).
-            start_time (float, optional): start time, used to check for timeout. Defaults to None.
-
-        Returns:
-            bool: True in case of successful request submission, False otherwise.
-        """
-
+    def push_frame(self, buf_stop: SyncEvent, start_time: float) -> bool:
         # Signal stop
         if buf_stop is not None and self.flags.time > 0.0:
             if time.time() - start_time > self.flags.time:
@@ -335,19 +169,9 @@ class ImageClient():
                 self._signal_end()
                 return False
 
-            # Download to RAM
-            # Acts as sync point on previous async GPU operations
-            img = np.ndarray(shape=self._get_shape(),
-                             dtype=triton_to_np_dtype(self.dtype))
-            success, info = self.dwn.Run(surf_dst, img)
-            if not success:
-                LOGGER.error(f"Failed to download surface: {info}")
-                self._signal_end()
-                return False
-
-            # Create inference request task
+            # Run inference
             future = self.executor.submit(
-                self._send, [img.copy()], str(self.num_surf))
+                self._inference, [surf_dst], str(self.num_surf))
             self.tasks.add(future)
             future.add_done_callback(self.tasks.remove)
 
@@ -362,13 +186,13 @@ class ImageClient():
 
         return True
 
-    def get_response(self) -> tuple[bool, dict]:
+    def get_result(self) -> tuple[bool, dict]:
         """
-        Get inference response
+        Get inference result
 
         Returns:
             tuple[bool, dict]:
-                First element is True if there are more responses from server available, False otherwise
+                First element is True if there are more results, False otherwise
                 Second element is dict with results, may be None if no responses are ready yet.
         """
 

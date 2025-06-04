@@ -175,8 +175,8 @@ class Decoder:
         try:
             pkt_data = vali.PacketData()
             if self.py_dec.IsAccelerated:
-                success, info, _ = self.py_dec.DecodeSingleSurfaceAsync(
-                    surf=self.surf, record_event=False, pkt_data=pkt_data)
+                success, info = self.py_dec.DecodeSingleSurfaceAsync(
+                    surf=self.surf, pkt_data=pkt_data)
 
                 if info == vali.TaskExecInfo.END_OF_STREAM:
                     return None

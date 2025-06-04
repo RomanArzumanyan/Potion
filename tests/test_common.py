@@ -19,10 +19,6 @@ def make_flags(
         gpu_id=0,
         time=3.0,
         num_retries=3,
-        model_name="densenet_onnx",
-        model_version=12,
-        classes=1,
-        url="0.0.0.0:8001",
         dump="",
         verbose=False,) -> argparse.Namespace:
 
@@ -31,10 +27,6 @@ def make_flags(
         "-g", str(gpu_id),
         "-t", str(time),
         "-n", str(num_retries),
-        "-m", model_name,
-        "-x", str(model_version),
-        "-c", str(classes),
-        "-u", url
     ]
 
     if len(dump):

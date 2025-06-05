@@ -68,22 +68,33 @@ class Converter:
         # Combined rescaler-resizer
         self.py_ud = vali.PySurfaceUD(gpu_id, cuda_stream)
 
-        # Output surface
-        self.surf_dst = vali.Surface.Make(
+        # Inference surface
+        self.surf_inf = vali.Surface.Make(
             self.dst_fmt, self.dst_w, self.dst_h, gpu_id)
 
+        # OSD surface
+        self.surf_osd = vali.Surface.Make(
+            vali.PixelFormat.RGB, self.dst_w, self.dst_h, gpu_id)
+
     def req_params(self) -> list[str]:
+        """
+        Get required parameters list
+        """
         return self.req_params
 
     @nvtx.annotate()
     def convert(self, surf_src: vali.Surface, sync=False) -> vali.Surface:
+        """
+        Resample and colorspace conversion
+        """
         if surf_src.Format != self.src_fmt:
             raise RuntimeError("Input surface format mismatch")
 
-        success, info = self.py_ud.Run(
-            surf_src, self.surf_dst) if sync else self.py_ud.Run(surf_src, self.surf_dst)
-        if not success:
-            LOGGER.error(f"Failed to resample-rescale surface: {info}")
-            return None
+        for surf_dst in [self.surf_inf, self.surf_osd]:
+            success, info = self.py_ud.Run(
+                surf_src, surf_dst) if sync else self.py_ud.Run(surf_src, surf_dst)
+            if not success:
+                LOGGER.error(f"Failed to resample-rescale surface: {info}")
+                return None
 
-        return self.surf_dst
+        return self.surf_inf, self.surf_osd

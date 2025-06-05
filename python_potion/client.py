@@ -32,6 +32,7 @@ from multiprocessing.synchronize import Event as SyncEvent
 
 import python_potion.decoder as decoder
 import python_potion.converter as converter
+import python_potion.osd as osd
 import python_vali as vali
 import time
 import concurrent.futures
@@ -42,9 +43,9 @@ from ultralytics import YOLO
 import torch
 import json
 import nvtx
+import base64
 
 from kafka import KafkaProducer
-
 
 LOGGER = logging.getLogger(__file__)
 
@@ -56,16 +57,12 @@ class ClientState(Enum):
 
 
 class InferenceClient():
-    def __init__(self, flags: Namespace, inp_queue: Queue,):
+    def __init__(
+            self,
+            flags: Namespace,
+            inp_queue: Queue,):
         """
-        Constructor.
-
-        Args:
-            flags (Namespace): parsed CLI args
-            inp_queue (Queue): queue with video track chunks
-
-        Raises:
-            InferenceServerException: if triton throws an exception
+        Constructor
         """
 
         self.gpu_id = flags.gpu_id
@@ -79,7 +76,7 @@ class InferenceClient():
         self.w = 640
         self.h = 640
 
-        # Decoder and converter
+        # Decoder, converter, OSD composer
         self.dec = decoder.Decoder(inp_queue, self.flags)
 
         params = {
@@ -91,6 +88,8 @@ class InferenceClient():
 
         self.conv = converter.Converter(
             params, self.flags, self.gpu_id, self.dec.cuda_stream())
+
+        self.osd = osd.Composer(flags)
 
         # Use YOLO model for segmentation and tracking
         self.model = YOLO("yolo11n.pt")
@@ -105,38 +104,74 @@ class InferenceClient():
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
     @nvtx.annotate()
-    def _process(self, results, request_id) -> None:
+    def _osd(
+            self,
+            surf_inf: vali.Surface,
+            surf_osd: vali.Surface,
+            req_body: dict) -> None:
         """
-        Process inference result and publish to Kafka topic.
+        Do OSD, compress into jpeg, insert into requet body
         """
         try:
-            for detection in results:
-                result = detection
-                result["request_id"] = request_id
-                encoded_message = json.dumps(result).encode("utf-8")
+            self.osd.draw(surf_inf, surf_osd, req_body)
+            jpeg_bytes = self.osd.compress_jpeg(surf_osd)
+            if jpeg_bytes is not None:
+                req_body['picture'] = base64.b64encode(
+                    jpeg_bytes).decode('utf-8')
 
-                future = self.producer.send(
-                    topic=self.topic,
-                    value=encoded_message
-                )
-                result = future.get(timeout=60)
+        except Exception as e:
+            LOGGER.error(f"Failed to do OSD: {str(e)}")
+
+    @nvtx.annotate()
+    def _process(
+            self,
+            surf_inf: vali.Surface,
+            surf_osd: vali.Surface,
+            results: list,
+            request_id: str) -> None:
+        """
+        Process result, publish to Kafka topic
+        """
+        try:
+            req_body = {}
+            req_body["request_id"] = request_id
+            req_body['detections'] = []
+
+            for res in results:
+                req_body['detections'].append(res)
+
+            if not len(req_body['detections']):
+                return
+
+            self._osd(surf_inf, surf_osd, req_body)
+            encoded_message = json.dumps(req_body).encode('utf-8')
+
+            future = self.producer.send(self.topic, encoded_message)
+            result = future.get(timeout=60)
 
         except Exception as e:
             LOGGER.error("Failed to publish: " + str(e))
 
     @nvtx.annotate()
-    def _inference(self, surf: vali.Surface, request_id: str) -> None:
+    def _inference(
+            self,
+            surf_inf: vali.Surface,
+            surf_osd: vali.Surface,
+            request_id: str) -> None:
         """
-        Run inference, get response
+        Run inference
         """
-
         try:
-            img = torch.from_dlpack(surf).clamp(
+            img = torch.from_dlpack(surf_inf).clamp(
                 0.0, 1.0).clone().detach().reshape([1, 3, self.h, self.w])
 
-            # results = self.model.track(img, persist=True, verbose=False)
-            results = self.model.track(img, persist=True)
-            self._process(json.loads(results[0].to_json()), request_id)
+            results = self.model.track(img, persist=True, verbose=False)
+            self._process(
+                surf_inf.Clone(),
+                surf_osd.Clone(),
+                json.loads(results[0].to_json()),
+                request_id)
+
             self.num_resp += 1
 
         except Exception as e:
@@ -147,7 +182,13 @@ class InferenceClient():
         self.push_done = True
 
     @nvtx.annotate()
-    def push_frame(self, buf_stop: SyncEvent, start_time: float) -> bool:
+    def push_frame(
+            self,
+            buf_stop: SyncEvent,
+            start_time: float) -> bool:
+        """
+        Push single frame though processing chain
+        """
         # Signal stop
         if buf_stop is not None and self.flags.time > 0.0:
             if time.time() - start_time > self.flags.time:
@@ -161,14 +202,14 @@ class InferenceClient():
                 return False
 
             # Process to match NN expectations
-            surf_dst = self.conv.convert(surf_src)
-            if surf_dst is None:
+            surf_inf, surf_osd = self.conv.convert(surf_src)
+            if surf_inf is None or surf_osd is None:
                 self._signal_push_end()
                 return False
 
             # Run inference
             future = self.executor.submit(
-                self._inference, surf_dst, str(self.num_surf))
+                self._inference, surf_inf, surf_osd, str(self.num_surf))
             self.tasks.add(future)
             future.add_done_callback(self.tasks.remove)
 

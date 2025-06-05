@@ -43,6 +43,8 @@ import torch
 import json
 import nvtx
 
+from kafka import KafkaProducer
+
 
 LOGGER = logging.getLogger(__file__)
 
@@ -77,11 +79,8 @@ class InferenceClient():
         self.w = 640
         self.h = 640
 
-        # Create decoder and converter
+        # Decoder and converter
         self.dec = decoder.Decoder(inp_queue, self.flags)
-
-        # Use YOLO model for segmentation and tracking
-        self.model = YOLO("yolo11n.pt")
 
         params = {
             "src_fmt": self.dec.format(),
@@ -93,61 +92,59 @@ class InferenceClient():
         self.conv = converter.Converter(
             params, self.flags, self.gpu_id, self.dec.cuda_stream())
 
-        # Deal with batch size etc.
-        self.batch_size = self.flags.batch_size
-        self.supports_batching = self.batch_size > 0
-        if not self.supports_batching and self.batch_size != 1:
-            raise RuntimeError("ERROR: This model doesn't support batching.")
+        # Use YOLO model for segmentation and tracking
+        self.model = YOLO("yolo11n.pt")
+
+        # Kafka stuff
+        self.topic = self.flags.kafka_topic
+        self.producer = KafkaProducer(bootstrap_servers='localhost:9092')
 
         # Async stuff
+        self.push_done = False
         self.tasks = set()
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-
-        # Results
-        self.results = SimpleQueue()
-        self.all_done = False
 
     @nvtx.annotate()
     def _process(self, results, request_id) -> None:
         """
-        Process inference result and put it into stdout.
+        Process inference result and publish to Kafka topic.
         """
-        for detection in results:
-            result = {request_id: detection}
-            self.results.put(result)
+        try:
+            for detection in results:
+                result = detection
+                result["request_id"] = request_id
+                encoded_message = json.dumps(result).encode("utf-8")
+
+                future = self.producer.send(
+                    topic=self.topic,
+                    value=encoded_message
+                )
+                result = future.get(timeout=60)
+
+        except Exception as e:
+            LOGGER.error("Failed to publish: " + str(e))
 
     @nvtx.annotate()
-    def _signal_end(self) -> None:
-        """
-        Put sentinel message into results queue.
-        It signals that no more tasks will be submitted.
-        """
-
-        def _impl(results: SimpleQueue) -> None:
-            results.put(None)
-
-        future = self.executor.submit(_impl, self.results)
-        self.tasks.add(future)
-        future.add_done_callback(self.tasks.remove)
-
-    @nvtx.annotate()
-    def _inference(self, surf_inf: list[vali.Surface], request_id: str) -> None:
+    def _inference(self, surf: vali.Surface, request_id: str) -> None:
         """
         Run inference, get response
         """
 
-        assert len(surf_inf) == self.batch_size
-
         try:
-            img = torch.from_dlpack(surf_inf[0]).clamp(
+            img = torch.from_dlpack(surf).clamp(
                 0.0, 1.0).clone().detach().reshape([1, 3, self.h, self.w])
 
-            results = self.model.track(img, persist=True, verbose=False)
+            # results = self.model.track(img, persist=True, verbose=False)
+            results = self.model.track(img, persist=True)
             self._process(json.loads(results[0].to_json()), request_id)
             self.num_resp += 1
 
         except Exception as e:
             LOGGER.error("Failed to run inference: " + str(e))
+
+    @nvtx.annotate()
+    def _signal_push_end(self):
+        self.push_done = True
 
     @nvtx.annotate()
     def push_frame(self, buf_stop: SyncEvent, start_time: float) -> bool:
@@ -160,18 +157,18 @@ class InferenceClient():
             # Decode Surface
             surf_src = self.dec.decode()
             if surf_src is None:
-                self._signal_end()
+                self._signal_push_end()
                 return False
 
             # Process to match NN expectations
             surf_dst = self.conv.convert(surf_src)
             if surf_dst is None:
-                self._signal_end()
+                self._signal_push_end()
                 return False
 
             # Run inference
             future = self.executor.submit(
-                self._inference, [surf_dst], str(self.num_surf))
+                self._inference, surf_dst, str(self.num_surf))
             self.tasks.add(future)
             future.add_done_callback(self.tasks.remove)
 
@@ -181,29 +178,16 @@ class InferenceClient():
         except Exception as e:
             LOGGER.error(
                 f"Frame {self.num_surf}. Unexpected excepton: {str(e)}")
-            self._signal_end()
+            self._signal_push_end()
             return False
 
         return True
 
-    def get_result(self) -> tuple[bool, dict]:
+    def all_done(self) -> bool:
         """
-        Get inference result
-
-        Returns:
-            tuple[bool, dict]:
-                First element is True if there are more results, False otherwise
-                Second element is dict with results, may be None if no responses are ready yet.
+        Return True if all frames have been processed
         """
+        if not self.push_done:
+            return False
 
-        res = None
-
-        if not self.all_done:
-            try:
-                res = self.results.get_nowait()
-                if not res:
-                    self.all_done = True
-            except Empty:
-                pass
-
-        return (not self.all_done, res)
+        return 0 == len(self.tasks)

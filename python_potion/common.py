@@ -159,4 +159,20 @@ def get_parser() -> argparse.ArgumentParser:
         default=1024,
         help="Buffer queue size in chunks. Default is 1024.",
     )
+    parser.add_argument(
+        "-k",
+        "--kafka_url",
+        type=str,
+        required=True,
+        default="127.0.0.1:9092",
+        help="Kafka URL.",
+    )
+    parser.add_argument(
+        "-p",
+        "--kafka_topic",
+        type=str,
+        required=True,
+        default="potion",
+        help="Kafka topic to publish to.",
+    )
     return parser

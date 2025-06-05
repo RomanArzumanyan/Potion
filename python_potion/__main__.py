@@ -59,20 +59,17 @@ def main(flags: argparse.Namespace) -> None:
     client = inference_client.InferenceClient(flags, buf_queue)
 
     # 2.2
-    # Run inference and get response if there are any.
+    # Run inference.
     # Client will signal buf_proc to stop after timeout.
     counter = 2
     while counter > 0:
-        # Decoder will run out of frames first.
+        # First we wait for all inference tasks to be submitted.
         if counter > 1:
             counter -= not client.push_frame(buf_stop, start_time)
 
-        # Then we drain results.
+        # Then we wait for all tasks to be finished.
         if counter > 0:
-            more_to_come, res = client.get_result()
-            if res:
-                print(res)
-            counter -= not more_to_come
+            counter -= client.all_done()
 
     # 3.1
     # Join buffering process.

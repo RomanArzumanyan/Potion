@@ -43,9 +43,7 @@ from ultralytics import YOLO
 import torch
 import json
 import nvtx
-import base64
-
-from kafka import KafkaProducer
+import numpy as np
 
 LOGGER = logging.getLogger(__file__)
 
@@ -72,18 +70,25 @@ class InferenceClient():
         self.num_surf = 0
         self.num_resp = 0
 
+        # Decoder, converter, OSD composer
+        self.dec = decoder.Decoder(inp_queue, self.flags)
+
         # Width and height expected by NN
         self.w = 640
         self.h = 640
 
-        # Decoder, converter, OSD composer
-        self.dec = decoder.Decoder(inp_queue, self.flags)
+        # Width and height for OSD operations
+        self.osd_w = self.w
+        self.osd_h = int(float(self.w) / float(self.dec.width())
+                         * float(self.dec.height()))
 
         params = {
             "src_fmt": self.dec.format(),
             "dst_fmt": vali.PixelFormat.RGB_32F_PLANAR,
             "dst_w": self.w,
             "dst_h": self.h,
+            "osd_w": self.osd_w,
+            "osd_h": self.osd_h,            
         }
 
         self.conv = converter.Converter(
@@ -93,10 +98,6 @@ class InferenceClient():
 
         # Use YOLO model for segmentation and tracking
         self.model = YOLO("yolo11n.pt")
-
-        # Kafka stuff
-        self.topic = self.flags.kafka_topic
-        self.producer = KafkaProducer(bootstrap_servers='localhost:9092')
 
         # Async stuff
         self.push_done = False
@@ -108,16 +109,13 @@ class InferenceClient():
             self,
             surf_inf: vali.Surface,
             surf_osd: vali.Surface,
-            req_body: dict) -> None:
+            req_body: dict) -> np.ndarray:
         """
         Do OSD, compress into jpeg, insert into requet body
         """
         try:
             self.osd.draw(surf_inf, surf_osd, req_body)
-            jpeg_bytes = self.osd.compress_jpeg(surf_osd)
-            if jpeg_bytes is not None:
-                req_body['picture'] = base64.b64encode(
-                    jpeg_bytes).decode('utf-8')
+            return self.osd.compress_jpeg(surf_osd)
 
         except Exception as e:
             LOGGER.error(f"Failed to do OSD: {str(e)}")
@@ -138,16 +136,15 @@ class InferenceClient():
             req_body['detections'] = []
 
             for res in results:
-                req_body['detections'].append(res)
+                if res['confidence'] >= 0.5:
+                    req_body['detections'].append(res)
 
             if not len(req_body['detections']):
                 return
 
-            self._osd(surf_inf, surf_osd, req_body)
-            encoded_message = json.dumps(req_body).encode('utf-8')
-
-            future = self.producer.send(self.topic, encoded_message)
-            result = future.get(timeout=60)
+            jpeg = self._osd(surf_inf, surf_osd, req_body)
+            with open(f"{request_id}.jpg", "wb") as f_out:
+                f_out.write(jpeg)
 
         except Exception as e:
             LOGGER.error("Failed to publish: " + str(e))

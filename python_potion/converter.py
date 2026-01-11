@@ -33,6 +33,8 @@ class Converter:
             "dst_fmt",
             "dst_w",
             "dst_h",
+            "osd_w",
+            "osd_h",            
         ]
 
         for param in self.req_par:
@@ -47,6 +49,8 @@ class Converter:
 
         self.dst_w = params["dst_w"]
         self.dst_h = params["dst_h"]
+        self.osd_w = params["osd_w"]
+        self.osd_h = params["osd_h"]        
 
         # Only (semi-)planar yuv420 input is supported.
         fmts = [vali.PixelFormat.NV12, vali.PixelFormat.YUV420]
@@ -74,7 +78,7 @@ class Converter:
 
         # OSD surface
         self.surf_osd = vali.Surface.Make(
-            vali.PixelFormat.RGB, self.dst_w, self.dst_h, gpu_id)
+            vali.PixelFormat.RGB, self.osd_w, self.osd_h, gpu_id)
 
     def req_params(self) -> list[str]:
         """
@@ -83,7 +87,7 @@ class Converter:
         return self.req_params
 
     @nvtx.annotate()
-    def convert(self, surf_src: vali.Surface, sync=False) -> vali.Surface:
+    def convert(self, surf_src: vali.Surface, sync=False) -> tuple[vali.Surface]:
         """
         Resample and colorspace conversion
         """

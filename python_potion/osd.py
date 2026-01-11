@@ -33,7 +33,7 @@ class Composer():
         scale_y = surf_osd.Height / surf_inf.Height
 
         bbox[0] = int(bbox[0] * scale_x)
-        bbox[2] = int(bbox[2] * scale_x / surf_osd.Shape[2])
+        bbox[2] = int(bbox[2] * scale_x)
         bbox[1] = int(bbox[1] * scale_y)
         bbox[3] = int(bbox[3] * scale_y)
 
